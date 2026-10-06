@@ -1,10 +1,15 @@
+import logging
 import math
 import re
 
 import numexpr
+from ddgs import DDGS
 from langchain_chroma import Chroma
 from langchain_core.tools import BaseTool, tool
-from langchain_openai import OpenAIEmbeddings
+
+from core import get_embeddings
+
+logger = logging.getLogger(__name__)
 
 
 def calculator_func(expression: str) -> str:
@@ -50,10 +55,12 @@ def format_contexts(docs):
 def load_chroma_db():
     # Create the embedding function for our project description database
     try:
-        embeddings = OpenAIEmbeddings()
+        embeddings = get_embeddings()
     except Exception as e:
         raise RuntimeError(
-            "Failed to initialize OpenAIEmbeddings. Ensure the OpenAI API key is set."
+            "Failed to initialize the embeddings backend. Check OPENAI_API_KEY, or "
+            "EMBEDDING_API_KEY / EMBEDDING_BASE_URL / EMBEDDING_MODEL if you are using an "
+            "OpenAI-compatible provider."
         ) from e
 
     # Load the stored vector database
@@ -78,3 +85,42 @@ def database_search_func(query: str) -> str:
 
 database_search: BaseTool = tool(database_search_func)
 database_search.name = "Database_Search"  # Update name with the purpose of your database
+
+
+# ddgs' own default is too short on this network: engines that do answer need up to ~30s
+# when the request goes through a proxy, and get killed early otherwise.
+SEARCH_TIMEOUT = 30
+
+
+def web_search_func(query: str) -> str:
+    """Searches the web for current information.
+
+    Useful for when you need to answer questions about current events, news,
+    weather or anything else not covered by your training data.
+
+    Args:
+        query (str): The search query.
+
+    Returns:
+        str: The top search results, or a message explaining why there are none.
+    """
+
+    try:
+        results = DDGS(timeout=SEARCH_TIMEOUT).text(query, max_results=5)
+    except Exception as e:
+        # ddgs raises on timeouts and on empty result sets. ToolNode's default handler
+        # re-raises anything that isn't a ToolInvocationError, which kills the whole run
+        # and leaves the checkpoint with dangling tool_calls, so failures must come back
+        # as tool output instead.
+        logger.warning(f"web search failed for {query!r}: {e}")
+        return f"Search failed: {e}"
+    if not results:
+        return "No results found."
+    return "\n\n".join(
+        f"{result.get('title', '')}\n{result.get('href', '')}\n{result.get('body', '')}"
+        for result in results
+    )
+
+
+web_search: BaseTool = tool(web_search_func)
+web_search.name = "WebSearch"

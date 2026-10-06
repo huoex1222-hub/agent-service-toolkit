@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from langchain_community.tools import DuckDuckGoSearchResults, OpenWeatherMapQueryRun
+from langchain_community.tools import OpenWeatherMapQueryRun
 from langchain_community.utilities import OpenWeatherMapAPIWrapper
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, SystemMessage
@@ -11,7 +11,7 @@ from langgraph.managed import RemainingSteps
 from langgraph.prebuilt import ToolNode
 
 from agents.safeguard import Safeguard, SafeguardOutput, SafetyAssessment
-from agents.tools import calculator
+from agents.tools import calculator, web_search
 from core import get_model, settings
 
 
@@ -25,7 +25,6 @@ class AgentState(MessagesState, total=False):
     remaining_steps: RemainingSteps
 
 
-web_search = DuckDuckGoSearchResults(name="WebSearch")
 tools = [web_search, calculator]
 
 # Add weather tool if API key is set

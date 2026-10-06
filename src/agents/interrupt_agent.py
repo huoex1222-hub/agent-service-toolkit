@@ -13,6 +13,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from core import get_model, settings
+from schema.models import DeepseekModelName
 
 # Added logger
 logger = logging.getLogger(__name__)
@@ -62,6 +63,9 @@ Rules for extraction:
 - Consider various date formats (MM/DD/YYYY, YYYY-MM-DD, Month Day, Year)
 - Validate that the date is reasonable (not in the future)
 - If no clear birthdate was provided by the user, return None
+
+Reply as json with exactly this shape:
+{{"birthdate": "YYYY-MM-DD" or null, "reasoning": "why the birthdate was or wasn't found"}}
 """)
 
 
@@ -127,10 +131,19 @@ async def determine_birthdate(
         )
 
     # If birthdate wasn't retrieved from store, proceed with extraction
-    m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
-    model_runnable = wrap_model(
-        m.with_structured_output(BirthdateExtraction), birthdate_extraction_prompt.format()
-    ).with_config(tags=["skip_stream"])
+    model_name = config["configurable"].get("model", settings.DEFAULT_MODEL)
+    m = get_model(model_name)
+    # DeepSeek rejects the default json_schema response_format, and its thinking mode refuses
+    # a forced tool_choice, so json_mode is the only option there. Anthropic doesn't accept
+    # json_mode at all, hence the split.
+    structured = (
+        m.with_structured_output(BirthdateExtraction, method="json_mode")  # type: ignore[bad-argument-type]
+        if model_name in DeepseekModelName
+        else m.with_structured_output(BirthdateExtraction)
+    )
+    model_runnable = wrap_model(structured, birthdate_extraction_prompt.format()).with_config(
+        tags=["skip_stream"]
+    )
     response: BirthdateExtraction = await model_runnable.ainvoke(state, config)
 
     # If no birthdate found after extraction attempt, interrupt
