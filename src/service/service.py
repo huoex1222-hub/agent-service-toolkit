@@ -236,7 +236,7 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
         output.run_id = str(run_id)
         return output
     except Exception as e:
-        logger.error(f"An exception occurred: {e}")
+        logger.exception(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
@@ -443,7 +443,7 @@ async def history(input: ChatHistoryInput, agent_id: str = DEFAULT_AGENT) -> Cha
         chat_messages: list[ChatMessage] = [langchain_to_chat_message(m) for m in messages]
         return ChatHistory(messages=chat_messages)
     except Exception as e:
-        logger.error(f"An exception occurred: {e}")
+        logger.exception(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
 
@@ -468,7 +468,7 @@ async def threads(
     try:
         summaries = await list_user_threads(checkpointer, input.user_id, agent_id, input.limit)
     except Exception as e:
-        logger.error(f"An exception occurred: {e}")
+        logger.exception(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
     return UserThreads(threads=summaries)

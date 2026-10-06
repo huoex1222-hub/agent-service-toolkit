@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import sys
 
@@ -7,7 +6,10 @@ from dotenv import load_dotenv
 
 from core import settings
 
-load_dotenv()
+# override=True: .env wins over vars already in the process environment. Without it a
+# HTTP_PROXY injected by the launcher (VS Code's proxy support picks up the Windows system
+# proxy) silently shadows the one in .env, because dotenv only fills in missing keys.
+load_dotenv(override=True)
 
 if __name__ == "__main__":
     root_logger = logging.getLogger()
@@ -18,20 +20,16 @@ if __name__ == "__main__":
         )
 
     logging.basicConfig(level=settings.LOG_LEVEL.to_logging_level())
-    # Set Compatible event loop policy on Windows Systems.
-    # On Windows systems, the default ProactorEventLoop can cause issues with
-    # certain async database drivers like psycopg (PostgreSQL driver).
-    # The WindowsSelectorEventLoopPolicy provides better compatibility and prevents
-    # "RuntimeError: Event loop is closed" errors when working with database connections.
-    # This needs to be set before running the application server.
-    # Refer to the documentation for more information.
+    # psycopg's async mode can't run on Windows' default ProactorEventLoop. uvicorn >= 0.36
+    # builds the loop from a factory rather than consulting the event loop policy, so the
+    # selection has to go through `loop` as a dotted path.
     # https://www.psycopg.org/psycopg3/docs/advanced/async.html#asynchronous-operations
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    loop = "asyncio:SelectorEventLoop" if sys.platform == "win32" else "auto"
     uvicorn.run(
         "service:app",
         host=settings.HOST,
         port=settings.PORT,
         reload=settings.is_dev(),
         timeout_graceful_shutdown=settings.GRACEFUL_SHUTDOWN_TIMEOUT,
+        loop=loop,
     )
