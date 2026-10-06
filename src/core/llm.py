@@ -1,4 +1,5 @@
 from functools import cache
+from typing import Any
 
 from langchain_anthropic import ChatAnthropic
 from langchain_aws import ChatBedrock
@@ -7,7 +8,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_vertexai import ChatVertexAI
 from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_openai import AzureChatOpenAI, ChatOpenAI, OpenAIEmbeddings
 
 from core.settings import settings
 from schema.models import (
@@ -152,3 +153,22 @@ def get_model(model_name: AllModelEnum, /) -> ModelT:
         return FakeToolModel(responses=["This is a test response from the fake model."])
 
     raise ValueError(f"Unsupported model: {model_name}")
+
+
+def get_embeddings() -> OpenAIEmbeddings:
+    """Embeddings for the RAG agents.
+
+    Defaults to OpenAI proper; set EMBEDDING_BASE_URL to use any OpenAI-compatible
+    embeddings API instead (e.g. SiliconFlow). Whatever model ends up selected must be
+    the same one that built the Chroma database -- vectors from different models are not
+    comparable, and mixing them fails silently by returning irrelevant chunks.
+    """
+    kwargs: dict[str, Any] = {}
+    if settings.EMBEDDING_MODEL:
+        kwargs["model"] = settings.EMBEDDING_MODEL
+    if settings.EMBEDDING_BASE_URL:
+        if not settings.EMBEDDING_API_KEY:
+            raise ValueError("EMBEDDING_API_KEY must be set when EMBEDDING_BASE_URL is set")
+        kwargs["base_url"] = settings.EMBEDDING_BASE_URL
+        kwargs["api_key"] = settings.EMBEDDING_API_KEY.get_secret_value()
+    return OpenAIEmbeddings(**kwargs)

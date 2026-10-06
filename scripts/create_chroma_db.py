@@ -1,11 +1,17 @@
 import os
 import shutil
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader
-from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Make src/ importable so this script reuses the app's embedding configuration.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from core import get_embeddings  # noqa: E402
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -18,7 +24,7 @@ def create_chroma_db(
     chunk_size: int = 2000,
     overlap: int = 500,
 ):
-    embeddings = OpenAIEmbeddings(api_key=os.environ["OPENAI_API_KEY"])
+    embeddings = get_embeddings()
 
     # Initialize Chroma vector store
     if delete_chroma_db and os.path.exists(db_name):

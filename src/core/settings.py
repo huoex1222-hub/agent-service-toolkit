@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     COMPATIBLE_API_KEY: SecretStr | None = None
     COMPATIBLE_BASE_URL: str | None = None
 
+    # Embeddings used by the RAG agents. Left unset, this falls back to OpenAI proper;
+    # point EMBEDDING_BASE_URL at any OpenAI-compatible endpoint (e.g. SiliconFlow) instead.
+    EMBEDDING_API_KEY: SecretStr | None = None
+    EMBEDDING_BASE_URL: str | None = None
+    EMBEDDING_MODEL: str | None = None
+
     OPENWEATHERMAP_API_KEY: SecretStr | None = None
 
     # MCP Configuration
