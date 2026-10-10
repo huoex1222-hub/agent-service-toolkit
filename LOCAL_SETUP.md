@@ -138,7 +138,7 @@ uv run streamlit run src/streamlit_app.py
 
 Windows 下激活虚拟环境是 `.venv\Scripts\activate`，不是 README 里写的 `source .venv/bin/activate`。
 
-想调试时看详细日志，加 `LOG_LEVEL=INFO` 前缀，例如 `LOG_LEVEL=INFO uv run python src/run_service.py`。
+想调试时看详细日志，加 `LOG_LEVEL=INFO` 前缀，例如 `LOG_LEVEL=INFO uv run python src/run_service.py`。（VS Code 的「Agent Service」启动配置里已内置这个环境变量，F5 直接就是 INFO；**别写进 `.env`** —— `override=True` 会让它反过来盖住 launch.json，理由见 [NETWORK_CAPTURE.md](NETWORK_CAPTURE.md) 方案⑤。）
 
 ## 坑
 

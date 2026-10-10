@@ -303,6 +303,69 @@ Wireshark → Preferences → Protocols → TLS → `(Pre)-Master-Secret log fil
 
 > LangChain 的 debug **没有环境变量**——`langchain_core/globals.py` 里只有 `set_debug()`，只能从代码里开。
 
+## 方案⑤ 日志关联 id
+
+2026-10-10 加入。不用抓包工具，日志行自带 `[run_id/thread_id]`——终端里先把范围缩到某一次请求：
+
+```text
+# chatbot 一次调用（实测）
+16:59:40 INFO [01a1250a-…/final-demo] service.service:151: Run started: agent=chatbot
+16:59:43 INFO [01a1250a-…/final-demo] service.utils:41: LLM call: deepseek-flash 34→181 tokens
+16:59:43 INFO [01a1250a-…/final-demo] service.service:242: Run finished in 2.9s
+
+# research-assistant（节点时序 + 每次 LLM 调用，各一行）
+17:16:37 INFO [01a12518-…/node-filter-check] service.utils:75: Node: guard_input (0.00s)
+17:16:38 INFO [01a12518-…/node-filter-check] service.utils:43: LLM call: deepseek-flash 628→95 tokens
+17:16:38 INFO [01a12518-…/node-filter-check] service.utils:75: Node: model (0.88s)
+17:16:38 INFO [01a12518-…/node-filter-check] service.utils:75: Node: tools (0.00s)
+17:16:38 INFO [01a12518-…/node-filter-check] service.utils:43: LLM call: deepseek-flash 736→2 tokens
+17:16:38 INFO [01a12518-…/node-filter-check] service.utils:75: Node: model (0.60s)
+```
+
+（`service.service:339` 这样的行号就是打日志那行的位置，出问题直接跳过去；库打的日志行号会指向 site-packages，属正常。）
+
+**和 Langfuse 的对应关系**（同一批 callback 事件的两个消费者）：
+
+| 日志行 | Langfuse 里的 |
+| --- | --- |
+| `Node: model (0.88s)` | `CHAIN model` |
+| `LLM call: … tokens` | `GENERATION ChatOpenAI` |
+| `Tool call: WebSearch(...)` | `TOOL WebSearch` |
+
+**Langfuse 里多出来的 `check_safety` / `pending_tool_calls` 是条件边函数**（元数据带 `seq:step:*` 标签，不是 `graph:step:*`），不是图节点，日志里**故意不打**——每条消息多两行、信息量低（想加的话在对应 agent 的边函数里加一行 logger 即可）。判定「谁是节点」的条件：只有节点自己的 run，名字才等于元数据里的 `langgraph_node`。
+
+- 一次 run 在终端能看到：起止 + 总耗时、每次 LLM 调用（模型 + token 数）、每次工具调用（名字 + 参数前 160 字符）。
+- **`LLM call` 这行是自己打的**（`src/service/utils.py` 的 `LogLLMCalls`）。**langfuse 在 import 时会把 `httpx` logger 压到 WARNING**（`langfuse/logger.py:22`，"to reduce noise"），所以服务里拿不到 httpx 自己的 `HTTP Request: POST …` 行——别去 `.env` 或 logging 配置里找，原因是这个。
+- 出现 `[-/-]` 的两种情况：① 启动阶段（还没请求）；② **线程池里跑的库**——ddgs 的搜索走 `primp:`，那些行没有 id，因为 contextvars 不跨线程传播（Java 的 MDC 在线程池里同样是这个毛病，要靠 TaskDecorator 之类手工传）。uvicorn 自己的 `INFO: ...` 行则是另一个原因：它有自己的 logger 和格式。
+- LogRecord 上其实有三个字段——`run_id` / `thread_id` / `user_id`，默认格式只打前两个，要 user 就改 `LOG_FORMAT`。
+
+**机制**（`src/core/log_context.py`）：Python 里 MDC 的对应物是 **contextvars**（一个线程跑多个协程，ThreadLocal 会串数据）+ 一个 `logging.Filter`。请求入口 bind（`service.py` 的 `_handle_input`、`agui.py` 的 `_base_config`），`run_service.py` 调 `configure_logging()` 装格式。contextvars 是任务级的，请求之间不会互相污染。
+
+**和 Java 那套的分层对照**（两层别混为一谈）：
+
+| 层 | Java 世界 | Python 世界 | 本仓库 |
+| --- | --- | --- | --- |
+| 应用层 id | MDC + logback `%X{traceId}` | `contextvars` + `logging.Filter` | ✅ 就是这个 |
+| OTel 层 id | Micrometer/Sleuth **自动**把 traceId/spanId 塞进 MDC | `opentelemetry-instrumentation-logging` 把 `otelTraceID`/`otelSpanID` 塞进 LogRecord | ❌ 没做 |
+| 后端的串联 | logback/Grafana 之类把它们串起来 | — | 用 `run_id` 串 |
+
+为什么没做 OTel 层：本仓库的 OTel span 上下文**只在 langfuse 的回调窗口内才 attach**（回调外 `trace.get_current_span()` 是空的，实测过），自动注入会时有时无；而 `run_id` 全程有效，还能直接对上 checkpoint 和 LangSmith。要做那层得引 `opentelemetry-instrumentation-logging` 并自建 tracer provider，属另一件事。
+
+**怎么开**：日志级别默认 `WARNING`（`src/core/settings.py:79`），两条 INFO 不会出来。
+
+- VS Code：「Agent Service」启动配置（`.vscode/launch.json`，untracked）里已经带 `"env": { "LOG_LEVEL": "INFO" }`，F5 就有。
+- 终端：`LOG_LEVEL=INFO uv run python src/run_service.py`。
+
+> **别把 `LOG_LEVEL` 写进 `.env`**：`run_service.py` 用 `load_dotenv(override=True)`，`.env` 里的值会**盖掉 launch.json**（坑 5 的代价），「调试用 INFO、平时 WARNING」的按需切换就没了。
+
+**四层怎么互相串**：
+
+| 从哪 → 到哪 | 用什么 |
+| --- | --- |
+| 日志行 → Langfuse | 复制 `run_id`，在 Langfuse 按 metadata `run_id` 过滤（trace metadata 现在带这个键；Langfuse 自己的 trace id 是另一串，对不上） |
+| 日志行 → 对话状态 | `thread_id` 查 checkpoints（见 [LOCAL_SETUP.md](LOCAL_SETUP.md) 的数据库一节） |
+| Langfuse → 原始报文 | generation 的 `x-ds-trace-id`（见上一节） |
+
 ## 怎么选
 
 | 目的 | 用哪个 |
@@ -311,6 +374,7 @@ Wireshark → Preferences → Protocols → TLS → `(Pre)-Master-Secret log fil
 | 想先零成本看一眼 | **④ `langchain.debug = True`** |
 | 看原始 HTTP 报文、验证请求体 | **② mitmproxy** |
 | 网络层问题（超时、连接、代理） | **③ Wireshark** |
+| 先定位「哪次请求」（不装任何工具） | **⑤ 日志关联 id**（已内建，`docker logs`/终端里直接看） |
 
 **建议路径**：**① 和 ② 本机都已部署好，直接开箱用**——Langfuse 看语义，mitmproxy 看报文。只想临时瞟一眼时再用 ④。
 

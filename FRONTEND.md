@@ -111,7 +111,7 @@ data: [DONE]                                    → 返回 None，循环结束
 | 非流式模式 | 设置里关掉 "Stream results" | `ainvoke` 一次性返回（`:343-355`） |
 | 历史会话列表 | 侧边栏 "Previous Chats" | `GET /threads?user_id=…&agent_id=…` |
 | 切换会话 | 点列表项 | `POST /history`，然后重建 URL 参数 |
-| 评分 | 星标控件 | `POST /feedback`，`run_id` 对齐 Langfuse/LangSmith 的 trace |
+| 评分 | 星标控件 | `POST /feedback` → **LangSmith** 的 run（`run_id` 就是它；Langfuse 的 trace id 是它自己生成的，不是这个 id） |
 | 语音 | `.env` 配 `VOICE_*_PROVIDER` | OpenAI STT/TTS（本机未启用） |
 
 ## 常见困惑
