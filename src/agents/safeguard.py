@@ -1,12 +1,22 @@
 import json
+import logging
 import re
 from enum import Enum
+from functools import cache
 
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core import get_model, settings
 from schema.models import GroqModelName
+
+logger = logging.getLogger(__name__)
+
+
+@cache
+def _warn_safeguard_disabled() -> None:
+    # Once per process: Safeguard is rebuilt for every guarded message.
+    logger.warning("GROQ_API_KEY not set, skipping Safeguard")
 
 
 class SafetyAssessment(Enum):
@@ -90,7 +100,7 @@ def parse_safeguard_output(output: str) -> SafeguardOutput:
 class Safeguard:
     def __init__(self) -> None:
         if settings.GROQ_API_KEY is None:
-            print("GROQ_API_KEY not set, skipping Safeguard")
+            _warn_safeguard_disabled()
             self.model = None
             return
         self.model = get_model(GroqModelName.GPT_OSS_SAFEGUARD_20B).with_config(

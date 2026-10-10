@@ -1,6 +1,11 @@
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolCall, ToolMessage
+import logging
+from uuid import uuid4
 
-from service.utils import langchain_to_chat_message
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolCall, ToolMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
+
+from service.utils import LogGraphNodes, LogLLMCalls, langchain_to_chat_message
 
 
 def test_messages_from_langchain() -> None:
@@ -42,3 +47,84 @@ def test_messages_tool_calls() -> None:
     assert ai_message.tool_calls[0]["id"] == "call_Jja7"
     assert ai_message.tool_calls[0]["name"] == "test_tool"
     assert ai_message.tool_calls[0]["args"] == {"x": 1, "y": 2}
+
+
+@pytest.mark.asyncio
+async def test_log_llm_calls_reports_model_and_tokens(caplog: pytest.LogCaptureFixture) -> None:
+    response = LLMResult(
+        generations=[
+            [
+                ChatGeneration(
+                    message=AIMessage(
+                        content="hi",
+                        response_metadata={"model_name": "deepseek-v4-flash"},
+                        usage_metadata={
+                            "input_tokens": 821,
+                            "output_tokens": 76,
+                            "total_tokens": 897,
+                        },
+                    )
+                )
+            ]
+        ]
+    )
+
+    with caplog.at_level(logging.INFO, logger="service.utils"):
+        await LogLLMCalls().on_llm_end(response)
+
+    assert "LLM call: deepseek-v4-flash 821→76 tokens" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_log_llm_calls_without_usage(caplog: pytest.LogCaptureFixture) -> None:
+    response = LLMResult(generations=[[ChatGeneration(message=AIMessage(content="hi"))]])
+
+    with caplog.at_level(logging.INFO, logger="service.utils"):
+        await LogLLMCalls().on_llm_end(response)
+
+    assert "LLM call: unknown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_log_graph_nodes_logs_each_node_once(caplog: pytest.LogCaptureFixture) -> None:
+    handler = LogGraphNodes()
+    node_run, nested_run = uuid4(), uuid4()
+    metadata = {"langgraph_node": "model", "langgraph_step": 2}
+
+    with caplog.at_level(logging.INFO, logger="service.utils"):
+        await handler.on_chain_start(None, {}, run_id=node_run, name="model", metadata=metadata)
+        # A runnable inside the node repeats the same metadata under another name.
+        await handler.on_chain_start(
+            None, {}, run_id=nested_run, name="RunnableSequence", metadata=metadata
+        )
+        await handler.on_chain_end({}, run_id=nested_run)
+        await handler.on_chain_end({}, run_id=node_run)
+
+    assert caplog.text.count("Node: model") == 1
+
+
+@pytest.mark.asyncio
+async def test_log_graph_nodes_ignores_runs_without_node_metadata(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    handler = LogGraphNodes()
+    run_id = uuid4()
+
+    with caplog.at_level(logging.INFO, logger="service.utils"):
+        await handler.on_chain_start(None, {}, run_id=run_id, metadata={})
+        await handler.on_chain_end({}, run_id=run_id)
+
+    assert "Node:" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_log_graph_nodes_reports_a_failed_node(caplog: pytest.LogCaptureFixture) -> None:
+    handler = LogGraphNodes()
+    run_id = uuid4()
+    metadata = {"langgraph_node": "tools", "langgraph_step": 3}
+
+    with caplog.at_level(logging.INFO, logger="service.utils"):
+        await handler.on_chain_start(None, {}, run_id=run_id, name="tools", metadata=metadata)
+        await handler.on_chain_error(RuntimeError("boom"), run_id=run_id)
+
+    assert "Node: tools failed" in caplog.text

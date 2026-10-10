@@ -23,8 +23,9 @@ from langchain_core.runnables import RunnableConfig
 
 from agents import DEFAULT_AGENT, AgentGraph, get_agent
 from core import settings
+from core.log_context import bind_correlation_ids, duration_suffix, mark_run_started
 from service.tracing import TracingCallbackHandler
-from service.utils import ensure_model_available
+from service.utils import LogGraphNodes, LogLLMCalls, ensure_model_available
 
 logger = logging.getLogger(__name__)
 
@@ -56,17 +57,20 @@ def _base_config(input_data: RunAgentInput, agent_id: str) -> RunnableConfig:
     if (model := configurable.get("model")) is not None:
         ensure_model_available(model)
 
-    callbacks: list[Any] = []
+    callbacks: list[Any] = [LogLLMCalls(), LogGraphNodes()]
     if settings.LANGFUSE_TRACING:
         callbacks.append(TracingCallbackHandler())
 
     configurable = dict(configurable)
     user_id = configurable.setdefault("user_id", str(uuid4()))
+    bind_correlation_ids(run_id=input_data.run_id, thread_id=input_data.thread_id, user_id=user_id)
+    mark_run_started()
+    logger.info(f"Run started: agent={agent_id}")
 
     return RunnableConfig(
         configurable=configurable,
         # Recorded in checkpoint metadata so AG-UI threads show up in /threads too.
-        metadata={"user_id": user_id, "agent_id": agent_id},
+        metadata={"user_id": user_id, "agent_id": agent_id, "run_id": input_data.run_id},
         callbacks=callbacks,
     )
 
@@ -89,6 +93,7 @@ async def _event_stream(
         if event.type == EventType.RAW:
             continue
         yield encoder.encode(event)
+    logger.info(f"Run finished{duration_suffix()}")
 
 
 @router.post("/run", operation_id="agui_run_default")

@@ -27,6 +27,7 @@ from langsmith import uuid7
 
 from agents import DEFAULT_AGENT, AgentGraph, get_agent, get_all_agent_info, load_agent
 from core import settings
+from core.log_context import bind_correlation_ids, duration_suffix, mark_run_started
 from memory import initialize_database, initialize_store
 from schema import (
     ChatHistory,
@@ -44,6 +45,8 @@ from service.agui import router as agui_router
 from service.threads import list_user_threads
 from service.tracing import TracingCallbackHandler
 from service.utils import (
+    LogGraphNodes,
+    LogLLMCalls,
     convert_message_content_to_string,
     ensure_model_available,
     langchain_to_chat_message,
@@ -144,13 +147,16 @@ async def _handle_input(
     run_id = uuid7()
     thread_id = user_input.thread_id or str(uuid4())
     user_id = user_input.user_id or str(uuid4())
+    bind_correlation_ids(run_id=str(run_id), thread_id=thread_id, user_id=user_id)
+    mark_run_started()
+    logger.info(f"Run started: agent={agent_id}")
 
     configurable = {"thread_id": thread_id, "user_id": user_id}
     if user_input.model is not None:
         ensure_model_available(user_input.model)
         configurable["model"] = user_input.model
 
-    callbacks: list[Any] = []
+    callbacks: list[Any] = [LogLLMCalls(), LogGraphNodes()]
     if settings.LANGFUSE_TRACING:
         # Records the trace, plus the provider's per-call id (e.g. DeepSeek's x-ds-trace-id)
         langfuse_handler = TracingCallbackHandler()
@@ -169,7 +175,9 @@ async def _handle_input(
 
     config = RunnableConfig(
         configurable=configurable,
-        metadata={"user_id": user_id, "agent_id": agent_id},
+        # run_id in metadata too: Langfuse generates its own trace id, so this is what
+        # ties a trace back to the log line and the checkpoint.
+        metadata={"user_id": user_id, "agent_id": agent_id, "run_id": str(run_id)},
         run_id=run_id,
         callbacks=callbacks,
     )
@@ -232,6 +240,7 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
             raise ValueError(f"Unexpected response type: {response_type}")
 
         output.run_id = str(run_id)
+        logger.info(f"Run finished{duration_suffix()}")
         return output
     except Exception as e:
         logger.exception(f"An exception occurred: {e}")
@@ -326,6 +335,9 @@ async def message_generator(
                 # LangGraph re-sends the input message, which feels weird, so drop it
                 if chat_message.type == "human" and chat_message.content == user_input.message:
                     continue
+                for tool_call in chat_message.tool_calls:
+                    args = json.dumps(tool_call.get("args"), ensure_ascii=False)
+                    logger.info(f"Tool call: {tool_call['name']}({args[:160]})")
                 yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()}, ensure_ascii=False)}\n\n"
 
             if stream_mode == "messages":
@@ -348,6 +360,7 @@ async def message_generator(
         logger.error(f"Error in message generator: {e}")
         yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'})}\n\n"
     finally:
+        logger.info(f"Run finished{duration_suffix()}")
         yield "data: [DONE]\n\n"
 
 

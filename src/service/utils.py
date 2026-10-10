@@ -1,7 +1,11 @@
+import logging
+import time
 from collections.abc import Mapping
 from typing import Any, cast
+from uuid import UUID
 
 from fastapi import HTTPException
+from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -11,9 +15,69 @@ from langchain_core.messages import (
 from langchain_core.messages import (
     ChatMessage as LangchainChatMessage,
 )
+from langchain_core.outputs import LLMResult
 
 from core import settings
 from schema import ChatMessage
+
+logger = logging.getLogger(__name__)
+
+
+class LogLLMCalls(AsyncCallbackHandler):
+    """One log line per LLM call, so a run's model activity is visible in the terminal.
+
+    The Langfuse SDK raises the httpx logger to WARNING on import, so httpx's own
+    per-request lines never reach this app's logs.
+    """
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        for batch in response.generations:
+            for generation in batch:
+                message = getattr(generation, "message", None)
+                metadata = getattr(message, "response_metadata", None) or {}
+                model = metadata.get("model_name") or metadata.get("model") or "unknown"
+                usage = getattr(message, "usage_metadata", None) or {}
+                tokens = ""
+                if "input_tokens" in usage and "output_tokens" in usage:
+                    tokens = f" {usage['input_tokens']}→{usage['output_tokens']} tokens"
+                logger.info(f"LLM call: {model}{tokens}")
+
+
+class LogGraphNodes(AsyncCallbackHandler):
+    """One line per LangGraph node, so the terminal shows the node timeline Langfuse does.
+
+    Both read the same callback stream. Everything inside a node -- nested runnables and
+    the conditional-edge functions -- repeats the node's ``langgraph_node`` metadata; only
+    the node's own run is named after it, which is what this filters on.
+    """
+
+    def __init__(self) -> None:
+        self._runs: dict[UUID, tuple[str, float]] = {}
+
+    async def on_chain_start(
+        self,
+        serialized: dict[str, Any] | None,
+        inputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        node = (metadata or {}).get("langgraph_node")
+        if not node or name != node:
+            return
+        self._runs[run_id] = (node, time.perf_counter())
+
+    async def on_chain_end(self, outputs: Any, *, run_id: UUID, **kwargs: Any) -> None:
+        node, started = self._runs.pop(run_id, ("", 0.0))
+        if node:
+            logger.info(f"Node: {node} ({time.perf_counter() - started:.2f}s)")
+
+    async def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+        node, started = self._runs.pop(run_id, ("", 0.0))
+        if node:
+            logger.info(f"Node: {node} failed after {time.perf_counter() - started:.2f}s")
 
 
 def ensure_model_available(model: Any) -> None:

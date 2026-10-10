@@ -5,6 +5,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 from core import settings
+from core.log_context import configure_logging
 
 # override=True: .env wins over vars already in the process environment. Without it a
 # HTTP_PROXY injected by the launcher (VS Code's proxy support picks up the Windows system
@@ -19,7 +20,7 @@ if __name__ == "__main__":
             f"basicConfig() will be ignored. Current level: {logging.getLevelName(root_logger.level)}"
         )
 
-    logging.basicConfig(level=settings.LOG_LEVEL.to_logging_level())
+    configure_logging(settings.LOG_LEVEL.to_logging_level())
     # psycopg's async mode can't run on Windows' default ProactorEventLoop. uvicorn >= 0.36
     # builds the loop from a factory rather than consulting the event loop policy, so the
     # selection has to go through `loop` as a dotted path.
