@@ -21,9 +21,6 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 from langfuse import Langfuse  # type: ignore[import-untyped]
-from langfuse.langchain import (
-    CallbackHandler,  # type: ignore[import-untyped]
-)
 from langgraph.types import Command, Interrupt
 from langsmith import Client as LangsmithClient
 from langsmith import uuid7
@@ -45,6 +42,7 @@ from schema import (
 )
 from service.agui import router as agui_router
 from service.threads import list_user_threads
+from service.tracing import TracingCallbackHandler
 from service.utils import (
     convert_message_content_to_string,
     ensure_model_available,
@@ -154,8 +152,8 @@ async def _handle_input(
 
     callbacks: list[Any] = []
     if settings.LANGFUSE_TRACING:
-        # Initialize Langfuse CallbackHandler for Langchain (tracing)
-        langfuse_handler = CallbackHandler()
+        # Records the trace, plus the provider's per-call id (e.g. DeepSeek's x-ds-trace-id)
+        langfuse_handler = TracingCallbackHandler()
 
         callbacks.append(langfuse_handler)
 

@@ -10,8 +10,10 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from core.llm import get_model
+from core.provider_headers import TrimProviderHeaders
 from schema.models import (
     AnthropicModelName,
+    DeepseekModelName,
     FakeModelName,
     GroqModelName,
     OllamaModelName,
@@ -103,6 +105,16 @@ def test_get_model_openrouter_requires_key():
     with patch("core.settings.settings.OPENROUTER_API_KEY", None):
         with pytest.raises(ValueError, match="OpenRouter API key must be configured"):
             _get_model_uncached(OpenRouterModelName.GEMINI_36_FLASH)
+
+
+def test_get_model_deepseek_captures_the_provider_trace_headers():
+    with patch("core.settings.settings.DEEPSEEK_API_KEY", SecretStr("test_key")):
+        model = _get_model_uncached(DeepseekModelName.DEEPSEEK_V4_FLASH)
+        assert isinstance(model, ChatOpenAI)
+        assert model.include_response_headers is True
+        callbacks = model.callbacks
+        assert isinstance(callbacks, list)
+        assert any(isinstance(cb, TrimProviderHeaders) for cb in callbacks)
 
 
 def test_get_model_fake():

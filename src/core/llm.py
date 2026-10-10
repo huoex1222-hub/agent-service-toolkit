@@ -10,6 +10,7 @@ from langchain_groq import ChatGroq
 from langchain_ollama import ChatOllama
 from langchain_openai import AzureChatOpenAI, ChatOpenAI, OpenAIEmbeddings
 
+from core.provider_headers import TrimProviderHeaders
 from core.settings import settings
 from schema.models import (
     AllModelEnum,
@@ -105,6 +106,10 @@ def get_model(model_name: AllModelEnum, /) -> ModelT:
             streaming=True,
             openai_api_base="https://api.deepseek.com",
             openai_api_key=settings.DEEPSEEK_API_KEY,
+            # DeepSeek's per-call id (x-ds-trace-id) rides in the response headers; it is
+            # kept on the message so a Langfuse generation maps to one captured request.
+            include_response_headers=True,
+            callbacks=[TrimProviderHeaders()],
         )
     if model_name in AnthropicModelName:
         if model_name == AnthropicModelName.SONNET_5:
