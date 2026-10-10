@@ -8,13 +8,49 @@
 
 | # | 链路 | 协议 | 说明 |
 | --- | --- | --- | --- |
-| 1 | Streamlit:8501 → Agent 服务:8081 | 明文 HTTP | 最简单，curl / 浏览器 devtools 就能看 |
+| 1 | Streamlit:8501 → Agent 服务:8081 | 明文 HTTP + SSE | **浏览器 devtools 和 mitmproxy 都看不到**，见下节 |
 | 2 | Agent 服务 → **DeepSeek** | HTTPS 出站 | 多数人真正想抓的就是这个 |
 | 3 | Agent 服务 → ddgs 搜索 | HTTPS 出站，**走 Clash 代理** | 并发十几个搜索引擎 |
 | 4 | Agent 服务 → GitHub MCP (`api.githubcopilot.com`) | HTTPS 出站 | |
 | 5 | Agent 服务 → PostgreSQL:5432 | PG 协议，非 HTTP | 要用 `log_statement`，见下文 |
 
 出站流量（2/3/4）由 `.env` 里的 `HTTP_PROXY` / `HTTPS_PROXY` 决定走不走代理，见 [LOCAL_SETUP.md](LOCAL_SETUP.md) 的坑 6。
+
+## 看不到的那一跳：Streamlit → Agent 服务
+
+第 1 条链路是个观测死角，两个原因叠加：
+
+**浏览器 devtools 看不到** —— Streamlit 是服务端框架。浏览器只跟 Streamlit 服务器保持**一条 WebSocket**（`ws://localhost:8501/_stcore/stream`，二进制 protobuf 双向帧），那条 SSE 是 **Streamlit 的 Python 进程**用 httpx 发的（`src/client/client.py:302` 的 `client.stream()` + `aiter_lines()`），消费完再以 Markdown 增量推给浏览器。所以在 Network 面板里**根本不存在**这个请求；WS 面板里能看到的也只有二进制帧，读不出内容。
+
+> 容易过时的知识点：Streamlit 1.59.2 **已经不是 Tornado 了**，服务端换成了 Starlette + uvicorn（响应头 `server: uvicorn`，代码在 `streamlit/web/server/starlette/`）。别照老文章去理解它的服务器。
+
+**mitmproxy 也看不到** —— 本机有个 Windows 用户环境变量（`HKCU\Environment`）：
+
+```text
+NO_PROXY = localhost,127.0.0.1,::1
+```
+
+httpx 默认 `trust_env=True`，认这个变量，所以 localhost 这一跳**直接绕过 8888**。实测：把 `HTTP_PROXY` 指到一个死端口，`http://localhost:8081/info` 照样返回 200。mitmproxy 里因此只有「服务 → 外网」那几段（DeepSeek / 搜索 / GitHub MCP）。
+
+### 想看到这一跳，用这三个
+
+```sh
+# 1. curl 直接怼（-N 关掉 curl 自己的缓冲，中文按 LOCAL_SETUP 坑 4 走文件）
+curl -N -X POST http://localhost:8081/chatbot/stream \
+  -H "Content-Type: application/json; charset=utf-8" \
+  --data-binary @/tmp/payload.json
+# 出来的是裸 SSE 帧：data: {"type": "token", "content": "1"} ... data: [DONE]
+
+# 2. AG-UI 客户端（Node，走 /agui，能看事件流）
+cd scripts/agui-client && npm install
+AGENT_URL=http://localhost:8081 node client.mjs "你好" chatbot
+
+# 3. Langfuse（语义层，比裸帧可读得多）
+```
+
+**为什么不让浏览器直连**：服务没有 CORS 中间件（`src/` 里没有 `CORSMiddleware`），跨源会被浏览器拦掉。而且 `/stream` 是 **POST + JSON body**，浏览器原生 `EventSource` 只支持 GET、带不了 body —— 就算 CORS 通了也得用 `fetch()` + `ReadableStream` 手动解析。`docs/AGUI.md` 里也是同样的结论：生产上让 CopilotKit runtime 在服务端转一道。
+
+> 反过来说：如果你在 devtools 里「看到了 SSE」，那多半是别的东西（比如某个直连 8081 的页面），不是 Streamlit 发的。
 
 ## 方案① 应用层 tracing（首选）—— 已部署
 
@@ -161,6 +197,27 @@ DELETE https://api.githubcopilot.com/mcp/           << 204 No Content
 
 一次 `chatbot` 调用让 flows 文件从 8.2 KB 涨到 245 KB。
 
+### 读单条 flow 的精确时间戳
+
+`mitmdump -nr` 只给一行摘要，排查耗时问题需要每段的毫秒时间。用 mitmproxy 自带的 Python 直接读 dump（不用管 UI 的 403，那个 token 机制只挡 HTTP API，不挡文件）：
+
+```sh
+MP_PY="$USERPROFILE/AppData/Roaming/uv/tools/mitmproxy/Scripts/python.exe"
+"$MP_PY" -c "
+from mitmproxy.io import FlowReader
+import datetime
+with open(r'C:\Users\huoex\.mitmproxy\flows.mitm', 'rb') as f:
+    for fl in FlowReader(f).stream():
+        r, resp = fl.request, fl.response
+        iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime('%H:%M:%S.%f')[:-3]
+        print(f'{iso(r.timestamp_start)} {r.method} {r.pretty_host}{r.path[:40]} resp_end={iso(resp.timestamp_end)}')
+"
+```
+
+`req_start / req_end / resp_start / resp_end` 四个点，比「总耗时」有用得多。
+
+**对 SSE 来说 `resp_end` 可信**：它是整条响应体（含 `data: [DONE]`）收完的时刻，不是响应头到达的时刻。验证方法：拿它和 Langfuse 上同一个 `ChatOpenAI` span 的耗时对——正常时两者差几十毫秒（实测 0.9 s / 1.14 s 这种量级对得上）。**对不上就说明问题不在网络上**，见 [LOCAL_SETUP.md](LOCAL_SETUP.md) 的「未解」一节。
+
 ### 坑
 
 1. **`primp` 这次没问题**（推翻了原先的猜测）：本机实测 ddgs 搜索穿过 mitmproxy 正常返回，DeepSeek 的 httpx 也正常。`SSL_CERT_FILE` 这条路对两者都有效。
@@ -202,6 +259,23 @@ DELETE https://api.githubcopilot.com/mcp/           << 204 No Content
 | 覆盖范围 | 只有 agent 内部 | 所有出站流量（含 GitHub MCP、ddgs 搜索） |
 
 两者可同时开启，互不干扰。**Langfuse 看「agent 做了什么」，mitmproxy 看「网线上跑了什么」。**
+
+### 精确关联：一条 generation ↔ 一个 flow
+
+2026-10-10 起，DeepSeek 每次调用的 `x-ds-trace-id` 会记进 Langfuse，两边可以 1:1 对上，不用再靠时间戳猜：
+
+```text
+Langfuse 点开可疑的 generation → Metadata 面板 → x-ds-trace-id → 复制
+   → mitmweb 过滤框输入  ~hs"<那个id>"   → 唯一命中这次请求（实测 238 条 flow 里命中 1 条）
+```
+
+实现分三处：`src/core/provider_headers.py`（白名单 + 裁剪回调）、`src/core/llm.py` 的 DeepSeek 分支（`include_response_headers=True`）、`src/service/tracing.py`（Langfuse handler 子类，在 `on_llm_end` 里把 id 写进 generation 的 metadata）。
+
+几个注意点：
+
+- **结构化输出拿不到这个 id**：`interrupt-agent` 的生日提取用 `with_structured_output(method="json_mode")`，而 langchain-openai 在请求带 `response_format` 时**直接跳过**响应头捕获（会在日志里打一条 UserWarning）。这类调用没有 trace id，属已知边界。
+- 捕获到的响应头有 13 个（~700 B），回调只保留 trace id 一个键；否则它会随每条 AI 消息进 graph state 和检查点。trace id 同时会出现在 SSE 的 `message` 帧里（`service/utils.py:58` 复制 `response_metadata`）。
+- 裁剪的白名单在 `PROVIDER_TRACE_HEADERS`（目前只有 DeepSeek）；换 provider 往那里加一行、并在 `src/core/llm.py` 对应分支开 `include_response_headers=True` 即可。
 
 ## 方案③ Wireshark + SSLKEYLOGFILE（真·抓包）
 
