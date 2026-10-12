@@ -1,0 +1,19 @@
+<!-- ClickHouse's own system logs, dropped.
+
+     Langfuse never reads them, and they were this stack's largest steady CPU cost:
+     system.asynchronous_metric_log had grown to 192M rows, and the constant
+     collect > flush > new part > merge churn kept ClickHouse between 4% and 20% of a
+     core (the 20% spikes were the merge bursts). Removed at startup, which also stops
+     the collection; the leftover tables can be dropped by hand for the disk space.
+
+     query_log is kept: it is small and useful for debugging. -->
+<clickhouse>
+    <asynchronous_metric_log remove="1"/>
+    <metric_log remove="1"/>
+    <text_log remove="1"/>
+    <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <part_log remove="1"/>
+    <background_schedule_pool_log remove="1"/>
+</clickhouse>

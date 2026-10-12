@@ -78,7 +78,8 @@ services:
     restart: always
     depends_on: *langfuse-depends-on
     ports:
-      - 127.0.0.1:3000:3000
+      # All interfaces (LAN access). Was 127.0.0.1:3000:3000 -- see LANGFUSE.md.
+      - "0.0.0.0:3000:3000"
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-mysecret} # CHANGEME
@@ -103,6 +104,8 @@ services:
     volumes:
       - langfuse_clickhouse_data:/var/lib/clickhouse
       - langfuse_clickhouse_logs:/var/log/clickhouse-server
+      # Drops ClickHouse's own system logs (biggest steady CPU cost here).
+      - ./clickhouse-system-logs.xml:/etc/clickhouse-server/config.d/zz-langfuse-system-logs.xml:ro
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
@@ -128,11 +131,15 @@ services:
     volumes:
       - langfuse_minio_data:/data
     healthcheck:
+      # `mc` costs ~27ms of CPU to start, so 1s checks burned ~2.7% of a core doing
+      # nothing. Keep them fast until the container is ready (start_interval), then
+      # back off; dependents only care about the startup transition.
       test: ["CMD", "mc", "ready", "local"]
-      interval: 1s
+      interval: 30s
+      start_interval: 2s
+      start_period: 10s
       timeout: 5s
-      retries: 5
-      start_period: 1s
+      retries: 3
 
   redis:
     image: docker.io/redis:7
