@@ -129,7 +129,7 @@ class AgentClient:
             except httpx.HTTPError as e:
                 raise AgentClientError(f"Error: {e}")
 
-        return ChatMessage.model_validate(response.json())
+        return ChatMessage.model_validate(obj=response.json())
 
     def invoke(
         self,
