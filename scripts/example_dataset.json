@@ -1,0 +1,23 @@
+[
+  {
+    "input": "只回复两个字：收到",
+    "expectedOutput": "收到"
+  },
+  {
+    "input": "用一句话解释什么是向量数据库",
+    "expectedOutput": "一句话内说明它是存储/索引向量、按相似度检索的数据库"
+  },
+  {
+    "input": "1+1等于几？只回复数字",
+    "expectedOutput": "2",
+    "comment": "exercises the calculator tool (research-assistant)"
+  },
+  {
+    "input": "把这句话翻译成英文，只给译文：今天天气不错",
+    "expectedOutput": "The weather is nice today."
+  },
+  {
+    "input": "用 Python 写一个列表去重的函数，只给代码",
+    "expectedOutput": "def dedupe(xs): return list(dict.fromkeys(xs))"
+  }
+]
