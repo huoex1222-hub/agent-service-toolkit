@@ -227,6 +227,34 @@ FROM observations WHERE environment='langfuse-llm-as-a-judge' ORDER BY start_tim
 
 **想修**：给默认评估模型加模型参数 `{"reasoning": {"effort": "none"}}`（存在 `default_llm_models.model_params`，现在还是 `{}`）。UI 里有模型参数输入框就填进去，没有的话一条 UPDATE 即可。
 
+**最终落点：评委换成 SiliconFlow 的 `inclusionAI/Ling-mini-2.0`**（2026-10-14 晚，实测 **11/11 成功、平均 1.8s**、判语合理）。
+
+折腾出来的那份对比表（都实测）：
+
+| 候选 | 强制工具调用 | 延迟 | 结论 |
+| --- | --- | --- | --- |
+| `deepseek-flash` / `deepseek-v4-pro` | **0/3** | — | 兼容层不稳 |
+| 上面两个 + `reasoning.effort=none` | **0/3** | — | **参数也救不了** |
+| `deepseek-chat` | 手动 12/12，Langfuse 真实调用下 ~40% | — | 不稳 |
+| `Qwen/Qwen3.8-27B`（SiliconFlow） | 8/8 ✓ | **10–13s** | 稳但**超过校验超时** → UI 保存转圈 |
+| `Qwen/Qwen3.5-9B` | 3/3 | 34s | 思考太重 |
+| `stepfun-ai/Step-3.5-Flash` | 2/3 | 10.7s | 不稳 |
+| **`inclusionAI/Ling-mini-2.0`** | **11/11** | **1.8s** | ✅ 不思考、快、便宜 |
+
+**配置办法**（评委换 provider 的完整流程）：
+
+1. 用**已有的 SiliconFlow key**（`.env` 里的 `EMBEDDING_API_KEY` —— SiliconFlow 的 key 是账号级的，chat 也能用）建一个 LLM 连接：
+   `provider = SiliconFlow`（自填名）、`adapter = openai`、`baseURL = https://api.siliconflow.cn/v1`、自定义模型填 `inclusionAI/Ling-mini-2.0`
+2. `Settings → Evaluations → Default model` 选它 → 输入 `update` 确认
+3. 评估器页面重新激活
+
+两个关键认知：
+
+- **它的"校验"是真的调用一次模型**（要拿结构化输出），所以**模型慢会以 `aborted due to timeout` 失败** —— 你看到的"页面一直转圈"就是这个（Qwen3.8-27B 要 10–13 秒，超了）。选评委模型时**速度比聪明更重要**。
+- 评委模型**不一定要跟你 agent 同族**；实际上不同族更好（避免同族评委的自我偏好偏差），而这里正好是：agent=DeepSeek，judge=Ling-mini。
+
+实测闭环：新 trace → `job_executions: COMPLETED` → `Conciseness = 1`（判语合理），对比 DeepSeek 时期满屏 `0.1` + 编造的评论。
+
 > 已知改进项：给 filter 加一条 `level != ERROR`，省得评委给失败调用编评论。
 
 ### Prompt Management（2026-10-14 试点：research-assistant）
@@ -271,6 +299,38 @@ PYTHONPATH=src uv run python scripts/experiment.py --dataset research-basics --m
 ```
 
 （`AGENT_URL` 从 `.env` 读；服务要先起着。`--agent/--model/--limit/--base-url` 都可选。）
+
+**手动跑一遍（三步）**：
+
+1. **服务要在跑**：`curl -s http://localhost:8081/health` → `{"status":"ok","langfuse":"connected"}`。脚本不启动服务，只是调它。
+2. **在仓库根目录跑**（⚠️ 不是 `src/` 下；脚本自己会把 `src/` 加进 import 路径，**不需要** `PYTHONPATH`，PowerShell / Git Bash 都一样）：
+
+   ```sh
+   cd /d/stu/github/agent-service-toolkit        # Git Bash；PowerShell 用 cd D:\stu\github\agent-service-toolkit
+   uv run python scripts/experiment.py --dataset research-basics --limit 2 --run-name quick-1
+   ```
+
+   终端逐条打印 `延迟 + 回答预览`，最后给汇总。6 条 × flash ≈ 一分钱以内。
+3. **去 Langfuse 看**：`Datasets → research-basics → Runs`，并排看输出/延迟/成本；**评委分要等 ~30 秒**（评估器有 30s 延迟）才出现；点任一格进 agent 的真实 trace。
+
+两个容易踩的：**`--run-name` 是分组键**（同名会追加进同一次运行，想并排对比就用不同名字）；`--model` 的取值来自 `/info` 的模型清单（`curl -s localhost:8081/info` 可查）。
+
+**看对比（终端版 `--compare`）**：Langfuse 数据集页面是"题目×运行"的矩阵，逐条对比要来回点，所以在脚本里加了个终端对比：
+
+```sh
+uv run python scripts/experiment.py --dataset research-basics --compare flash-2 pro-2
+```
+
+逐题并排打印 `延迟 / 成本 / 分数 │ 回答前 58 字`，分数或内容不同会标 `⚠`；末尾给两次运行的汇总（条数/均延迟/总成本/均分）。实测一例：
+
+```text
+汇总 flash-2    6 条  均延迟 1.2s  总成本 $0.000857  均分 0.87 (n=6)
+汇总 pro-2      6 条  均延迟 2.2s  总成本 $0.003060  均分 0.83 (n=6)
+```
+
+→ **pro 慢一倍、贵 3.6 倍，均分反而略低** —— 这就是"拿数据决定"的样子。
+
+> **单题分数有噪声**：同一道题两次回答**文字完全一样**（都是"收到"），一次 1 分、一次 0 分。所以别对单题分数较真，看**均值**和**多次运行**的趋势。
 
 **实测（flash vs pro，各 5 题）**：
 
