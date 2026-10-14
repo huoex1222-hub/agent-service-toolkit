@@ -13,6 +13,7 @@ from langgraph.prebuilt import ToolNode
 from agents.safeguard import Safeguard, SafeguardOutput, SafetyAssessment
 from agents.tools import calculator, web_search
 from core import get_model, settings
+from core.prompts import get_prompt
 
 
 class AgentState(MessagesState, total=False):
@@ -50,7 +51,9 @@ instructions = f"""
     """
 
 
-def wrap_model(model: BaseChatModel) -> RunnableSerializable[AgentState, AIMessage]:
+def wrap_model(
+    model: BaseChatModel, instructions: str
+) -> RunnableSerializable[AgentState, AIMessage]:
     bound_model = model.bind_tools(tools)
     preprocessor = RunnableLambda(
         lambda state: [SystemMessage(content=instructions)] + state["messages"],
@@ -68,7 +71,16 @@ def format_safety_message(safety: SafeguardOutput) -> AIMessage:
 
 async def acall_model(state: AgentState, config: RunnableConfig) -> AgentState:
     m = get_model(config["configurable"].get("model", settings.DEFAULT_MODEL))
-    model_runnable = wrap_model(m)
+    prompt = get_prompt("research-assistant-instructions", instructions, current_date=current_date)
+    model_runnable = wrap_model(m, prompt.text)
+    if prompt.langfuse_prompt is not None:
+        config = {
+            **config,
+            "metadata": {
+                **(config.get("metadata") or {}),
+                "langfuse_prompt": prompt.langfuse_prompt,
+            },
+        }
     response = await model_runnable.ainvoke(state, config)
 
     if state["remaining_steps"] < 2 and response.tool_calls:
