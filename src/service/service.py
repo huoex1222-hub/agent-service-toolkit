@@ -20,7 +20,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import RunnableConfig
-from langfuse import Langfuse  # type: ignore[import-untyped]
+from langfuse import Langfuse, get_client  # type: ignore[import-untyped]
 from langgraph.types import Command, Interrupt
 from langsmith import Client as LangsmithClient
 from langsmith import uuid7
@@ -43,7 +43,7 @@ from schema import (
 )
 from service.agui import router as agui_router
 from service.threads import list_user_threads
-from service.tracing import TracingCallbackHandler
+from service.tracing import TracingCallbackHandler, run_id_as_trace_id
 from service.utils import (
     LogGraphNodes,
     LogLLMCalls,
@@ -158,8 +158,9 @@ async def _handle_input(
 
     callbacks: list[Any] = [LogLLMCalls(), LogGraphNodes()]
     if settings.LANGFUSE_TRACING:
-        # Records the trace, plus the provider's per-call id (e.g. DeepSeek's x-ds-trace-id)
-        langfuse_handler = TracingCallbackHandler()
+        # Records the trace, plus the provider's per-call id (e.g. DeepSeek's x-ds-trace-id).
+        # The trace id is our run id, so a score or a log line can be tied back to it.
+        langfuse_handler = TracingCallbackHandler(trace_context={"trace_id": run_id.hex})
 
         callbacks.append(langfuse_handler)
 
@@ -175,9 +176,14 @@ async def _handle_input(
 
     config = RunnableConfig(
         configurable=configurable,
-        # run_id in metadata too: Langfuse generates its own trace id, so this is what
-        # ties a trace back to the log line and the checkpoint.
-        metadata={"user_id": user_id, "agent_id": agent_id, "run_id": str(run_id)},
+        metadata={
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "run_id": str(run_id),
+            # Langfuse's own keys: its Users and Sessions views only read these.
+            "langfuse_user_id": user_id,
+            "langfuse_session_id": thread_id,
+        },
         run_id=run_id,
         callbacks=callbacks,
     )
@@ -412,7 +418,7 @@ async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> Stre
 @router.post("/feedback")
 async def feedback(feedback: Feedback) -> FeedbackResponse:
     """
-    Record feedback for a run to LangSmith.
+    Record feedback for a run to LangSmith, and to Langfuse when tracing is enabled.
 
     This is a simple wrapper for the LangSmith create_feedback API, so the
     credentials can be stored and managed in the service rather than the client.
@@ -426,6 +432,17 @@ async def feedback(feedback: Feedback) -> FeedbackResponse:
         score=feedback.score,
         **kwargs,
     )
+    if settings.LANGFUSE_TRACING and (trace_id := run_id_as_trace_id(feedback.run_id)):
+        try:
+            get_client().create_score(
+                trace_id=trace_id,
+                name=feedback.key,
+                value=feedback.score,
+                comment=kwargs.get("comment"),
+            )
+        except Exception as e:
+            # LangSmith already has the feedback; a missing score must not fail the request.
+            logger.error(f"Could not record the Langfuse score: {e}")
     return FeedbackResponse()
 
 

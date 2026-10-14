@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from langfuse.langchain import CallbackHandler  # type: ignore[import-untyped]
 
-from service.tracing import TracingCallbackHandler
+from service.tracing import TracingCallbackHandler, run_id_as_trace_id
 
 
 class FakeObservation:
@@ -75,3 +75,15 @@ def test_a_failing_update_does_not_break_the_run(parent_on_llm_end: None):
     handler = _handler(ExplodingObservation(), run_id)
 
     handler.on_llm_end(_result({"x-ds-trace-id": "abc123"}), run_id=run_id)
+
+
+def test_run_id_as_trace_id_strips_the_dashes():
+    assert (
+        run_id_as_trace_id("01a1250a-1713-7b90-a132-61bbeebeabee")
+        == "01a1250a17137b90a13261bbeebeabee"
+    )
+
+
+def test_run_id_as_trace_id_rejects_non_uuids():
+    assert run_id_as_trace_id("run-1") is None
+    assert run_id_as_trace_id("") is None

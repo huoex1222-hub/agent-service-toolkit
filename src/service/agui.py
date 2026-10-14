@@ -20,11 +20,12 @@ from ag_ui_langgraph import LangGraphAgent
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.runnables import RunnableConfig
+from langfuse.types import TraceContext  # type: ignore[import-untyped]
 
 from agents import DEFAULT_AGENT, AgentGraph, get_agent
 from core import settings
 from core.log_context import bind_correlation_ids, duration_suffix, mark_run_started
-from service.tracing import TracingCallbackHandler
+from service.tracing import TracingCallbackHandler, run_id_as_trace_id
 from service.utils import LogGraphNodes, LogLLMCalls, ensure_model_available
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,10 @@ def _base_config(input_data: RunAgentInput, agent_id: str) -> RunnableConfig:
 
     callbacks: list[Any] = [LogLLMCalls(), LogGraphNodes()]
     if settings.LANGFUSE_TRACING:
-        callbacks.append(TracingCallbackHandler())
+        # AG-UI clients pick their own run ids; only reuse the ones Langfuse accepts.
+        trace_id = run_id_as_trace_id(input_data.run_id)
+        trace_context: TraceContext | None = {"trace_id": trace_id} if trace_id else None
+        callbacks.append(TracingCallbackHandler(trace_context=trace_context))
 
     configurable = dict(configurable)
     user_id = configurable.setdefault("user_id", str(uuid4()))
@@ -70,7 +74,14 @@ def _base_config(input_data: RunAgentInput, agent_id: str) -> RunnableConfig:
     return RunnableConfig(
         configurable=configurable,
         # Recorded in checkpoint metadata so AG-UI threads show up in /threads too.
-        metadata={"user_id": user_id, "agent_id": agent_id, "run_id": input_data.run_id},
+        metadata={
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "run_id": input_data.run_id,
+            # Langfuse's own keys: its Users and Sessions views only read these.
+            "langfuse_user_id": user_id,
+            "langfuse_session_id": input_data.thread_id,
+        },
         callbacks=callbacks,
     )
 

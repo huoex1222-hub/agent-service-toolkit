@@ -18,6 +18,19 @@ from core.provider_headers import provider_trace_headers
 logger = logging.getLogger(__name__)
 
 
+def run_id_as_trace_id(run_id: str) -> str | None:
+    """The run id as a Langfuse trace id (32 hex chars), or None if it isn't a UUID.
+
+    Langfuse trace ids are UUIDs without dashes, so a run's trace can be addressed from
+    its run id alone: no lookup table, and a log line's run id matches the trace id.
+    Anything else (clients pass arbitrary strings to AG-UI) returns None.
+    """
+    try:
+        return UUID(str(run_id)).hex
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 class TracingCallbackHandler(CallbackHandler):  # type: ignore[misc]
     """Records a generation's provider trace id as observation metadata, so one Langfuse
     generation can be matched to one captured HTTP flow."""
