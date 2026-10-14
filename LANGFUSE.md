@@ -195,7 +195,98 @@ SELECT score_name, status, sampling, delay, variable_mapping::text, filter::text
 SELECT provider, adapter, model FROM default_llm_models;
 ```
 
+**评委是"又花一份钱"，但比例差别巨大**（都用真实 trace 数据算的）：
+
+| 一次运行 | 成本 |
+| --- | --- |
+| chatbot（单轮 1 次调用） | $0.00006 |
+| research-assistant（4 次调用 + 工具） | $0.0038 |
+| **一次评委调用**（实测：in 227 + cache 384 + out 184） | **$0.00029** |
+
+- 对 **research-assistant** ≈ **+7.6%**（可以忽略）；对极小的 chatbot ≈ **+450%**（评委比 agent 本身还贵 4 倍）。
+- **关键杠杆是 `sampling`**（`job_configurations` 里，当前 `1.0` 全量）：本地流量小、全量也就一天几分钱；**上生产建议 5–10%**；A/B / 回归用固定数据集跑几十条，一次实验几分钱。
+- 这笔钱买的是：替代人工看 trace（一条一分钟）、替代盲目上线、同一把尺子可反复用于 prompt / 模型对比。评委输入的大头是模板示例，DeepSeek 的 cache 已经命中一部分。
+
+**怎么看到评委返回了什么**（mitmproxy 抓不到 —— 评委跑在 Langfuse 容器里直连 `api.deepseek.com`，容器没有代理配置，且 Node 的 fetch 默认不认 `HTTP_PROXY`）：评委**自己的调用也记在 Langfuse 里**，`environment = langfuse-llm-as-a-judge`（评估器的 filter 把它从默认视图排掉了，所以 UI 里看不见）。直接查 ClickHouse：
+
+```sql
+SELECT toDateTime(start_time) t, type, level, left(status_message,60), left(output,120), usage_details
+FROM observations WHERE environment='langfuse-llm-as-a-judge' ORDER BY start_time DESC LIMIT 6;
+```
+
+失败 vs 成功长这样（2026-10-14 实测）：
+
+```text
+❌ GENERATION  output=[{"role":"assistant","content":[]}]   usage: input 248, cached 384, output 42
+   SPAN        ERROR  "No object generated: could not parse the response."
+✅ GENERATION  content=[{"type":"text","text":"{\"reasoning\":\"…"}]   ← 工具调用没来，JSON 是当**文本**回的，SDK 照样接受了
+   SPAN        output={"reasoning":"…","score":0.1}
+```
+
+即：**失败时模型返回的是空内容** —— 有 42 个输出 token 的计费，却没有产出任何可用的内容块（多半是思考内容被兼容层吞了）。这与 `deepseek-*` 默认开 thinking 的推断一致；手动实测**关掉思考**（`{"reasoning": {"effort": "none"}}`）后，同样的模板/内容能稳定拿到 tool_use。
+
+**想修**：给默认评估模型加模型参数 `{"reasoning": {"effort": "none"}}`（存在 `default_llm_models.model_params`，现在还是 `{}`）。UI 里有模型参数输入框就填进去，没有的话一条 UPDATE 即可。
+
 > 已知改进项：给 filter 加一条 `level != ERROR`，省得评委给失败调用编评论。
+
+### Prompt Management（2026-10-14 试点：research-assistant）
+
+**试点选了 `research-assistant` 的 instructions**（不是 safeguard —— 那台机器上 safeguard 空转，搬了看不到效果）。默认 agent、每次调用都跑、也确实需要反复调。
+
+**代码怎么接的**（三处）：
+
+1. `src/core/prompts.py`：`get_prompt(name, default, **variables)` —— 有 Langfuse 就用它，没有/拉不到/名字不存在就**回落本地常量**（`settings.LANGFUSE_TRACING` 关掉时直接返回本地）。所以 clone 下来没 Langfuse 也能跑 ✓
+2. `src/agents/research_assistant.py`：`acall_model` 里取一次 prompt，文本喂给 `wrap_model`，并把 prompt 对象挂到 run metadata 的 `langfuse_prompt` 键上（handler 只认这个键，`CallbackHandler.py:665`）→ **trace 关联到 prompt 版本**
+3. Langfuse 侧：`POST /api/public/prompts` 建了 `research-assistant-instructions`（text 类型、label `production`），正文用 `{{current_date}}` 占位、由 `get_prompt(...)` 的变量填
+
+**实测效果**：
+
+```text
+generation 上出现:   promptName: research-assistant-instructions | promptVersion: 1
+在 Langfuse 里发 v2（加了条 "回答末尾必须输出 [PROMPT-V2-LIVE]"）
+   → 等 60 秒（SDK 缓存过期）→ 同一个请求
+   → 回答里出现了 [PROMPT-V2-LIVE]，trace 显示 promptVersion: 2   ✓ 服务没重启
+（演示后已发 v3 把 production 恢复成原样；版本历史里 v1/v2/v3 都在）
+```
+
+**几个要知道的点**：
+
+- **缓存 60 秒**：Langfuse SDK 客户端缓存拉到的 prompt（`LANGFUSE_PROMPT_CACHE_DEFAULT_TTL_SECONDS`，默认 60），所以改词后最多 60 秒生效 —— 这就是"不用重启"的代价上限。`get_prompt` 每次都调是没问题的（命中缓存时只是一次字典查找）。
+- **API 建 prompt 必须带 `isActive: true`**（text 类型），否则 400 `invalid_union`。改 prompt = 再 POST 一次同名，会**新建一个 version** 并把 `production` label 挪过去。
+- **回落是静默的**：Langfuse 拉不到只打一条 warning 就用本地文本（`core/prompts.py`）。想确认当前生效的是哪个版本，看 trace 的 `promptVersion` —— 是空的就说明走的是本地兜底。
+- 想给别的 agent 也接：import `get_prompt`，把常量当 default 传进去即可（`rag_assistant.py` 的 instructions 是下一个自然候选）。**safeguard 的 policy 也适合**（策略型、需要反复调），但要先有 Groq key 才看得见效果。
+
+### Datasets + Experiments（2026-10-14 搭好）
+
+**被测对象就是服务本身**：脚本把数据集里的问题逐条打到 `POST /{agent}/invoke`，再把结果挂回 Langfuse 的数据集运行 —— 因为**响应的 run_id 就是 trace id**，数据集运行条目直接引用 **agent 自己的 trace**（完整 span 树、成本、prompt 版本），不是脚本造的壳。这一点是之前把 trace id 对齐成 run id 才顺理成章的。
+
+脚本：`scripts/experiment.py`（+ 示例题集 `scripts/example_dataset.json`）
+
+```sh
+# 1) 建数据集（或追加题目）
+PYTHONPATH=src uv run python scripts/experiment.py --dataset research-basics --seed scripts/example_dataset.json
+# 2) 每套配置跑一次；在 Langfuse 里并排对比
+PYTHONPATH=src uv run python scripts/experiment.py --dataset research-basics --model deepseek-v4-flash --run-name flash-1
+PYTHONPATH=src uv run python scripts/experiment.py --dataset research-basics --model deepseek-v4-pro  --run-name pro-1
+```
+
+（`AGENT_URL` 从 `.env` 读；服务要先起着。`--agent/--model/--limit/--base-url` 都可选。）
+
+**实测（flash vs pro，各 5 题）**：
+
+| run | n | 平均延迟 | 总成本 | 模型 | promptVersion |
+| --- | --- | --- | --- | --- | --- |
+| flash-1 | 5 | 2.1s | **$0.001334** | deepseek-v4-flash | 4 |
+| pro-1 | 5 | 2.1s | **$0.002679** | deepseek-v4-pro | 4 |
+
+pro 成本正好是 flash 的 2 倍、延迟持平 —— 这就是「改配置 → 跑同一批题 → 拿数据决定」的闭环。Langfuse UI 的 Datasets 页能并排看两次运行的输出，点进任一条就是 agent 的真实 trace。
+
+**几个设计点**：
+
+- **thread_id 按「run + item」隔离**（`{run_name}-{item_id}`）：否则第二次实验会接着第一次的对话历史，结果就被污染了。
+- 建数据集/写运行结果走 **公开 API**（SDK 没有 `create_dataset_run_item`）：`POST /datasets`、`POST /dataset-items`、`POST /dataset-run-items{runName,datasetItemId,traceId}`；查询运行条目要 `datasetId` + `runName`（不是 datasetName，给错会 400）。
+- 数据集是**要维护的东西**（题集要更新、结论要记），不像 Sessions/成本那样配一次就完事 —— 没具体改动要验时可以先放着。
+- 遗留：探针数据集 `zz-api-probe` 删不掉（`DELETE /api/public/datasets/{name}` 返回 405），在 UI 里删一下即可。
 
 ## 坑 1：compose 放在仓库根目录会导致 P1000 认证失败
 
