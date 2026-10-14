@@ -118,6 +118,85 @@ LANGFUSE_SECRET_KEY=sk-lf-local
 
 顺带确认：`.env` 里**不要**在值后面写 `#` 注释（`python-dotenv` 会把注释当成值的一部分，见 LOCAL_SETUP.md 坑 3）。
 
+## 已接入的 Langfuse 能力（2026-10-14）
+
+| 能力 | 状态 | 怎么接的 |
+| --- | --- | --- |
+| **Traces** | ✅ 一直有 | `CallbackHandler` 挂在 RunnableConfig（`service.py:_handle_input`、`agui.py:_base_config`） |
+| **Sessions** | ✅ 2026-10-14 | config metadata 加 `langfuse_session_id: thread_id` —— handler **只认这个键**（`CallbackHandler.py:496`），普通 `thread_id` 它不看 |
+| **Users** | ✅ 2026-10-14 | 同上，`langfuse_user_id: user_id` |
+| **Scores（人工反馈）** | ✅ 2026-10-14 | `POST /feedback` 除 LangSmith 外，再 `create_score(trace_id=run_id)`；因为 trace id 就是 run_id（见下），**不需要任何映射表** |
+| **trace id = run_id** | ✅ 2026-10-14 | handler 构造时传 `trace_context={"trace_id": run_id.hex}`（`src/service/tracing.py:run_id_as_trace_id`）—— 日志里的 run_id 拿去就是 trace id |
+
+实测过的链路：
+
+```text
+POST /chatbot/invoke → run_id 01a138ac-6807-7312-99cb-3381098732fa
+   → GET /api/public/traces/01a138ac6807731299cb3381098732fa → 200 ✓
+   → trace.userId = 请求的 user_id ✓   trace.sessionId = thread_id ✓
+POST /feedback（同一 run_id）→ Langfuse 出现 score: human-feedback-stars = 0.8 ✓
+```
+
+- **trace id 必须是 32 位 hex**：传的是 `UUID.hex`（无横杠）。AG-UI 的 run_id 由客户端给、不一定是 UUID —— 代码用 `run_id_as_trace_id()` 过滤，不合法就不指定（那条 trace 用 Langfuse 自己生成的 id）。
+- **评委别给报错的 trace 打分**：2026-10-14 实测一条 `Conciseness 0` 打在**连接失败**（`level=ERROR`）的 trace 上，评论却在批"生成内容只是重复了问题"——那次根本没有生成。用 LLM-as-a-judge 前先看 trace 的 level。
+- **还没接**：Datasets/Experiments、Prompt Management。
+
+### 成本追踪（2026-10-14 配好）
+
+Langfuse 内置的 50 个模型定义里**没有 DeepSeek**，所以 `totalCost` 一直是 0。用公开 API 建了两个定义（`POST /api/public/models`，凭据就是 `.env` 里的那对 key）：
+
+| 模型 | 匹配规则 | input /1M | output /1M | cache 读 /1M |
+| --- | --- | --- | --- | --- |
+| `deepseek-flash` | `(?i)^(deepseek-flash\|deepseek-v4-flash)$` | $0.30 | $1.20 | $0.006 |
+| `deepseek-v4-pro` | `(?i)^(deepseek-v4-pro\|deepseek-pro)$` | $1.32 | $3.96 | $0.044 |
+
+（价目取自官方 pricing 页，2026-10-14；这里是**峰时价**，谷时对半。匹配规则两个名字都要写，因为请求用的是 `deepseek-v4-flash`、而官方后来把正式名改成了 `deepseek-flash`。）
+
+**三个坑**（都实测过）：
+
+1. **推理 token 必须单独配价**。flash 默认 thinking，`usageDetails` 里 `output` 和 `output_reasoning` 是**两个键**；只配 `output` 的话推理部分按 0 算 —— 实测一次调用 `input=55, output=2, output_reasoning=37`，只配 output 时算 $1.59e-05，补上 `output_reasoning` 后 $6.33e-05（手算逐位吻合）。
+2. **公开 API 只收扁平价格或 `pricingTiers`**：直接传 `prices` 对象会被 400（`Must provide either flat prices ... OR pricingTiers`）；但 `pricingTiers[].prices` **接受任意用量键**（`output_reasoning`、`input_cache_read` 都能塞）。
+3. **不回溯**：成本在入库时计算一次，改完定义只影响**新** trace；历史 trace 会一直是 0。另外 API **没有更新接口**（`PUT` 405），改价目只能 `DELETE /api/public/models/{id}` 再重建。
+
+### LLM 评委（LLM-as-a-judge，2026-10-14 配的）
+
+评估页（`/project/local/evals/<id>`）上配了一个 `Conciseness` 评委：全量评（sampling 1.0）、延迟 30s、filter = `type:GENERATION` 且排除 Langfuse 自己的内部环境。
+
+**两个必须配对的地方**（都踩过）：
+
+1. **评委模型不能是 thinking 模型**。默认评估模型是**全局**的（UI 在 Settings → Evaluations，存在 `default_llm_models` 表）：
+   - `deepseek-flash` ✗ —— 直接报 `{"error":"Thinking mode does not support this tool_choice"}`；
+   - `deepseek-chat` ✓ —— 支持强制 tool_choice。
+
+   （同一个坑仓库里也踩过：`interrupt_agent` 的结构化输出，见 [LOCAL_SETUP.md](LOCAL_SETUP.md) 坑 8。）
+2. **变量映射必须是 `query ← input`、`generation ← output`**。配成 `generation ← input` 时，评委拿"用户的问题"当"模型的回答"，分数清一色 `0.1`、评论全是"只是把问题原样回显"——而且**它照样会给 `level=ERROR` 的失败 trace 打分**，评论纯属编造。
+
+**但它仍不稳定（DeepSeek 兼容层的锅，不是配置）**：实测评估任务约 **40% 成功**，失败信息恒为 `No object generated: could not parse the response`。手动复刻同一请求：
+
+| 复刻项 | 结果 |
+| --- | --- |
+| 真实模板 + 真实回答 | ✅ 正常返回 tool_use，评语合理 |
+| + AI-SDK 风格的 `$schema` / `additionalProperties` | ✅ |
+| + `stream: true` | ✅ |
+| 点名式 `tool_choice:{type:tool,name:X}` × 5 次 | ✅ 5/5 |
+| AI-SDK 式 `tool_choice:{type:any}` × 3 次 | ⚠️ 2/3，其中一次**响应体不是合法 JSON** |
+
+Langfuse 的 `generateObject` 走的是 `type:any` 那条路，所以撞上了 DeepSeek 的 `/anthropic` 兼容层不稳定。**当前选择：接受失败率，失败的在 UI 里对单条 trace 重跑**；想彻底稳就把评委换成 OpenAI/Anthropic 的模型（本机容器实测能直连 `api.openai.com`，评委调用很小、成本可忽略）。
+
+**排查用的三张表**（都在 `langfuse-postgres-1`）：
+
+```sql
+-- 每个评估任务的成败与错误
+SELECT to_char(created_at,'HH24:MI:SS') t, status, left(error,120), left(job_input_trace_id,14)
+FROM job_executions ORDER BY created_at DESC LIMIT 5;
+-- 评估器配置：filter / 变量映射 / 采样率 / 延迟
+SELECT score_name, status, sampling, delay, variable_mapping::text, filter::text FROM job_configurations;
+-- 评委用的默认模型（只在 UI 里改，没有公开 API）
+SELECT provider, adapter, model FROM default_llm_models;
+```
+
+> 已知改进项：给 filter 加一条 `level != ERROR`，省得评委给失败调用编评论。
+
 ## 坑 1：compose 放在仓库根目录会导致 P1000 认证失败
 
 最初把 `langfuse.yml` 放在仓库根目录，结果 `langfuse-web` 无限重启：

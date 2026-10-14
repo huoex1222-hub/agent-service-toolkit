@@ -362,7 +362,7 @@ Wireshark → Preferences → Protocols → TLS → `(Pre)-Master-Secret log fil
 
 | 从哪 → 到哪 | 用什么 |
 | --- | --- |
-| 日志行 → Langfuse | 复制 `run_id`，在 Langfuse 按 metadata `run_id` 过滤（trace metadata 现在带这个键；Langfuse 自己的 trace id 是另一串，对不上） |
+| 日志行 → Langfuse | 直接拿 `run_id` 当 Langfuse 的 trace id 用 —— **两者现在是同一个 id**（handler 用 `trace_context` 指定，去掉横杠即 32 位 trace id） |
 | 日志行 → 对话状态 | `thread_id` 查 checkpoints（见 [LOCAL_SETUP.md](LOCAL_SETUP.md) 的数据库一节） |
 | Langfuse → 原始报文 | generation 的 `x-ds-trace-id`（见上一节） |
 

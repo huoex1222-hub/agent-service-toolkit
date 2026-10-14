@@ -27,7 +27,7 @@
 第 2 层则是**普通 HTTP/1.1**：httpx 发 `POST /{agent}/stream`，响应为 `text/event-stream`（SSE）——一个「不结束的响应」，没有 Upgrade、不是 WebSocket。
 
 > 所以「Streamlit 用 socket 和后端通信吗」要看指哪一段：浏览器→Streamlit 是 WebSocket；Streamlit→Agent 服务是普通 HTTP，只不过流式响应的**传输层**当然是 TCP socket。
-
+>
 > 这一条直接解释了那个常见疑问：「为什么 devtools 里看不到 SSE」——因为 SSE 是**第 2 层**发的。详见 [NETWORK_CAPTURE.md](NETWORK_CAPTURE.md) 的「看不到的那一跳」。
 
 ## Streamlit 的执行模型
@@ -111,7 +111,7 @@ data: [DONE]                                    → 返回 None，循环结束
 | 非流式模式 | 设置里关掉 "Stream results" | `ainvoke` 一次性返回（`:343-355`） |
 | 历史会话列表 | 侧边栏 "Previous Chats" | `GET /threads?user_id=…&agent_id=…` |
 | 切换会话 | 点列表项 | `POST /history`，然后重建 URL 参数 |
-| 评分 | 星标控件 | `POST /feedback` → **LangSmith** 的 run（`run_id` 就是它；Langfuse 的 trace id 是它自己生成的，不是这个 id） |
+| 评分 | 星标控件 | `POST /feedback` → LangSmith 的 run **和** Langfuse 的 score（两边都发；`run_id` 既是 LangSmith 的 run id、也是 Langfuse 的 trace id） |
 | 语音 | `.env` 配 `VOICE_*_PROVIDER` | OpenAI STT/TTS（本机未启用） |
 
 ## 常见困惑
