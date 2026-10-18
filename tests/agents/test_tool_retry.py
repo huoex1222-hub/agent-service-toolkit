@@ -81,8 +81,9 @@ def test_handle_tool_errors_returns_deterministic_message() -> None:
     assert "bad" in message
 
 
-def test_calculator_reports_error_instead_of_raising() -> None:
-    assert "raised error" in calculator_func("1 +")
+def test_calculator_raises_on_invalid_expression() -> None:
+    with pytest.raises(ValueError, match="raised error"):
+        calculator_func("1 +")
 
 
 def test_web_search_reraises_rate_limit(monkeypatch) -> None:
@@ -144,4 +145,5 @@ async def test_research_assistant_returns_tool_error_to_model(monkeypatch) -> No
     tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
     assert model.calls == 2
     assert len(tool_messages) == 1
+    assert tool_messages[0].status == "error"
     assert "raised error" in tool_messages[0].content

@@ -37,7 +37,7 @@ def calculator_func(expression: str) -> str:
         )
         return re.sub(r"^\[|\]$", "", output)
     except Exception as e:
-        return (
+        raise ValueError(
             f'calculator("{expression}") raised error: {e}.'
             " Please try again with a valid numerical expression"
         )

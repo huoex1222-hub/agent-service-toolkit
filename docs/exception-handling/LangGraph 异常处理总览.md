@@ -67,7 +67,7 @@ LLM / 工具 / 节点内部抛异常
 | 位置 | 行为 | 性质 |
 | --- | --- | --- |
 | `agents/tools.py` `web_search` | 记录日志后重新抛出，交给 ToolNode 的重试层/错误处理器分类 | 瞬时错误可重试；确定性错误回给模型 |
-| `agents/tools.py` `calculator` | 非法表达式返回错误字符串 | 不重试，模型可据此自纠 |
+| `agents/tools.py` `calculator` | 非法表达式抛 `ValueError`，由 handler 转成 `ToolMessage(status="error")` | 不重试，模型可据此自纠 |
 | `agents/tools.py:55-64` `load_chroma_db` | 初始化 embedding 失败 → `RuntimeError` | fail fast，会终止该次 run |
 | `agents/safeguard.py:96-97` | JSON 解析失败 → `SafetyAssessment.ERROR` | 路由把 `ERROR` 当 safe，**fail-open** |
 | `agents/knowledge_base_agent.py:119-121` | 检索失败 → 空文档列表 | 降级；模型会回答“信息不足”，掩盖配置错误 |

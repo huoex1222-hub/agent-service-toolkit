@@ -114,7 +114,7 @@ agent.add_node(
 
 - HTTP 客户端超时：`DDGS(timeout=30)`、`httpx(timeout=...)`
 - async 工具：`async with asyncio.timeout(...)`
-- 返回错误字符串而不是抛异常（本项目的 `calculator`）
+- 确定性失败也可以抛异常，交给 `handle_tool_errors` 转成 `ToolMessage(status="error")`；不要抛会被重试层误判为瞬时错误的类型
 - 在函数内部重试，适合需要幂等控制的场景
 
 注意：**同步工具在线程池中执行，`asyncio.timeout` 只能取消等待，无法终止线程**；工具自身仍需要有超时兜底。
@@ -140,7 +140,7 @@ agent.add_node(
 
 `src/agents/tools.py` 的配合改动：
 
-- `calculator` 非法表达式返回错误字符串，不再抛 `ValueError`
+- `calculator` 非法表达式抛 `ValueError`（非瞬时错误，不触发重试），由 `handle_tool_errors` 转成 `ToolMessage(status="error")`
 - `web_search` 保留日志，但改为重新抛出：瞬时错误进入重试层，确定性错误由 handler 转成工具消息
 
 ### 尚未接入
@@ -166,3 +166,11 @@ retry result: 3 ok
 Tool error returned to the model: deterministic failure
 non-retryable: error | Tool failed: deterministic failure
 ```
+
+真实调用验证（2026-10-18，DeepSeek）：
+
+- 模型对 `Calculator("1 +")` 发起工具调用
+- `calculator` 抛 `ValueError`，`handle_tool_errors` 转成 `ToolMessage(status="error")`
+- 没有触发工具重试（只有 1 个 TOOL span）
+- 图回到 `model`，产生第二次 GENERATION（699→58、797→63 tokens）
+- Langfuse 中 TOOL span 为 `level=ERROR`
