@@ -76,6 +76,7 @@ THREAD_ID=my-thread node client.mjs "And another one" chatbot
   `AVAILABLE_MODELS` (400 if not allowed), same as the vanilla API.
 - **Interrupts** (human-in-the-loop) surface as a `CUSTOM` event named `on_interrupt`. Resume by
   running the same thread again with `{"forwardedProps": {"command": {"resume": <answer>}}}`.
+  See [HITL.md](HITL.md) for the full flow and limitations.
 - **Graph state is client-visible.** AG-UI's shared-state feature sends `STATE_SNAPSHOT` events
   containing the full graph state, so don't put secrets or internal-only data in agent state.
 - **`RAW` passthrough events are filtered out** by the adapter. Standard AG-UI clients ignore

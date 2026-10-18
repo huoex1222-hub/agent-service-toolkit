@@ -99,7 +99,7 @@ data: [DONE]
 - 共享 bearer 鉴权、agent 注册表、checkpointer/thread、tracing
 - `forwardedProps.configurable` 对应普通 API 的 `model` / `user_id` / `agent_config`；`thread_id`、`checkpoint_id`、`checkpoint_ns` 是保留键
 - **`/feedback` 和 `/history` 没有桥接**：AG-UI 的 `runId` 是客户端生成的，不作为 LangSmith run id；AG-UI 客户端从事件流自行维护历史
-- `interrupt` 以 `CUSTOM` 事件 `on_interrupt` 暴露；用 `forwardedProps.command.resume` 恢复
+- `interrupt` 以 `CUSTOM` 事件 `on_interrupt` 暴露；用 `forwardedProps.command.resume` 恢复。HITL 的完整梳理见 [HITL.md](HITL.md)
 - AG-UI 的 shared-state 会发 `STATE_SNAPSHOT`，不要把秘密放进 graph state
 
 完整用法见 [AGUI.md](AGUI.md)。
