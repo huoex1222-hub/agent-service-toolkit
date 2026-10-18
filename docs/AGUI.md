@@ -10,6 +10,9 @@ The heavy lifting (translating LangGraph execution into AG-UI events) is done by
 adapter (`src/service/agui.py`) that wires it into the agent registry, bearer auth, and Langfuse
 tracing.
 
+For how the AG-UI endpoint relates to the rest of the backend API, see
+[Backend_API.md](Backend_API.md).
+
 ## Endpoints
 
 | Endpoint | Description |
