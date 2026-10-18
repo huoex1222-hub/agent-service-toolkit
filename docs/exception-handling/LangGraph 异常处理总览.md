@@ -38,9 +38,9 @@ LLM / 工具 / 节点内部抛异常
   ├─ 节点层：RetryPolicy 重试 / TimeoutPolicy 超时 / error_handler 降级（见节点文档）
   │    └─ 仍失败 → LangGraph 终止本次 run（最后成功的 checkpoint 保留）
   └─ HTTP 层：
-       ├─ /invoke    → 500 "Unexpected error"
-       ├─ /stream    → SSE error 事件 + [DONE]
-       └─ /agui/run  → 服务端无捕获，SSE 连接中断
+       ├─ /invoke    → 500 "Unexpected error" + X-Run-ID/X-Error-Code
+       ├─ /stream    → SSE error 事件（code + run_id）+ [DONE]
+       └─ /agui/run  → RUN_ERROR 事件（code + run_id）
 ```
 
 ### 失败后的状态
@@ -56,9 +56,9 @@ LLM / 工具 / 节点内部抛异常
 
 | 入口 | 行为 | 位置 |
 | --- | --- | --- |
-| `/invoke` | `logger.exception`（有栈）→ 500 通用文案 | `service.py:251-253` |
-| `/stream` | `logger.error`（**无栈**）→ 发 error 事件 → `finally` 发 `[DONE]`；HTTP 状态仍为 200 | `service.py:365-370` |
-| `/agui/run` | `_event_stream` 无 try/except；`ag-ui-langgraph` 只转换显式 error 事件，不兜抛出的异常 → 连接中断 | `agui.py:89-107` |
+| `/invoke` | `logger.exception`（有栈）→ 500；`X-Run-ID` / `X-Error-Code` 响应头 + detail 带 run_id | `service.py:251-257` |
+| `/stream` | `logger.exception`（有栈）→ 发 error 事件（`code` + `run_id`）→ `finally` 发 `[DONE]`；HTTP 状态仍为 200 | `service.py:256-380` |
+| `/agui/run` | 捕获异常 → 发 `RUN_ERROR` 事件（`code` + `run_id`） | `agui.py:89-115` |
 
 更多细节见 [Agent 服务异常处理实践](<Agent 服务异常处理实践.md>)。
 
@@ -94,15 +94,15 @@ LLM / 工具 / 节点内部抛异常
 | --- | --- | --- | --- |
 | 1 | 高 | 普通接口未知 agent 返回 500 而非 404 | [服务实践](<Agent 服务异常处理实践.md>) |
 | 2 | 高 | `message_generator` 的 `_handle_input` / `get_agent` 在 `try` 之外 | [服务实践](<Agent 服务异常处理实践.md>) |
-| 3 | 中 | 客户端只包装 `httpx.HTTPError` | [服务实践](<Agent 服务异常处理实践.md>) |
+| 3 | 中 | 客户端只包装 `httpx.HTTPError`；错误帧的 code/run_id 已能透传，畸形 JSON 仍是裸异常 | [服务实践](<Agent 服务异常处理实践.md>) |
 | 4 | ~~中~~ 已修复 | calculator 错误处理 + research-assistant 工具重试 | [ToolNode](<LangGraph ToolNode 异常处理.md>) |
 | 5 | 低 | `/feedback` 的 LangSmith 调用无兜底 | [服务实践](<Agent 服务异常处理实践.md>) |
 | 6 | 低 | agent 加载失败无对外信号 | [服务实践](<Agent 服务异常处理实践.md>) |
 | 7 | 低（需产品决策） | Safeguard 解析失败 fail-open | 本文档降级点 / 节点文档 |
 | 8 | 高 | 除 Azure 和 chatbot 节点超时外，LLM 请求没有超时 | [节点重试与超时](<LangGraph 节点重试与超时.md>) |
 | 9 | 中 | 仅 chatbot 启用了 `RetryPolicy` | [节点重试与超时](<LangGraph 节点重试与超时.md>) |
-| 10 | 中 | `/stream` 失败无栈日志；没有 `on_llm_error` | [服务实践](<Agent 服务异常处理实践.md>) |
-| 11 | 中 | AG-UI 流中异常未捕获，连接直接中断 | [服务实践](<Agent 服务异常处理实践.md>) |
+| 10 | ~~中~~ 已修复（2026-10-18） | `/stream` 改用 `logger.exception`；补 `on_llm_error` | [服务实践](<Agent 服务异常处理实践.md>) |
+| 11 | ~~中~~ 已修复（2026-10-18） | AG-UI 捕获异常并发 `RUN_ERROR` | [服务实践](<Agent 服务异常处理实践.md>) |
 
 ## 测试覆盖概览
 

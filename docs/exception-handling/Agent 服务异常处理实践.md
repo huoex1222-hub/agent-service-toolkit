@@ -21,7 +21,7 @@
 | 未知 agent（普通接口） | **500（应为 404，见问题 1）** | `service.py:229/264/457/491` |
 | Agent 执行/历史/线程查询异常 | 500 `Unexpected error` | `service.py:251-253/473-475/498-500` |
 
-已知错误的兜底写法一致：`logger.exception(...)` 记录完整栈，客户端只拿到 `"Unexpected error"`。
+已知错误的兜底写法一致：`logger.exception(...)` 记录完整栈；客户端拿到通用文案 + 可关联的 `run_id` / `code`，但不会看到异常栈或内部细节。
 
 ## 各端点
 
@@ -32,11 +32,16 @@ try:
     ...
 except Exception as e:
     logger.exception(f"An exception occurred: {e}")
-    raise HTTPException(status_code=500, detail="Unexpected error")
+    code = error_code(e)
+    raise HTTPException(
+        status_code=500,
+        detail=f"Unexpected error (run_id={run_id}, code={code})",
+        headers={"X-Run-ID": str(run_id), "X-Error-Code": code},
+    )
 ```
 
 - 把 `_handle_input` 放在 `try` 之外，所以模型不可用（400）和保留键（422）能按预期返回
-- 其余异常统一 500；客户端只看到通用文案
+- 其余异常统一 500；`X-Run-ID` / `X-Error-Code` 响应头和 detail 里的 run_id 用于关联日志与 Langfuse
 
 ### `/history` 与 `/threads`
 
@@ -56,11 +61,13 @@ except Exception as e:
 
 ## SSE 流式（`message_generator`）
 
-`service.py:256-370` 有三层保护：
+`service.py:256-380` 有三层保护：
 
-1. **单条消息**：`langchain_to_chat_message` 失败 → 发 `{"type": "error", "content": "Unexpected error"}` → `continue`，流继续
-2. **整个流**：外层 `except Exception` → 发 `{"type": "error", "content": "Internal server error"}`
+1. **单条消息**：`langchain_to_chat_message` 失败 → `logger.exception` → 发 `{"type": "error", "content": "Unexpected error", "code": "message_parse", "run_id": "..."}` → `continue`，流继续
+2. **整个流**：外层 `except Exception` → `logger.exception` → 发 `{"type": "error", "content": "Internal server error", "code": "...", "run_id": "..."}`
 3. **收尾**：`finally` 记录 `Run finished` 并发 `data: [DONE]`
+
+`code` 由 `error_code()` 映射（`node_timeout`、`timeout`、`rate_limit`、`provider_error`、`connection_error`、`internal` 等），`run_id` 与 Langfuse trace id 对应。
 
 注意 **`_handle_input` 和 `get_agent` 都在 `try` 之前**（问题 2）：
 
@@ -74,8 +81,8 @@ except Exception as e:
 `src/service/agui.py`：
 
 - `_base_config` 在返回 `StreamingResponse` **之前**执行，所以 404/422/400 都是正常的 HTTP 响应
-- `_event_stream` 在流开始后**没有 try/except**；`ag-ui-langgraph` 只把显式 error 事件转成 `RunErrorEvent`，不会兜住抛出的异常
-- LLM 或节点异常会导致 SSE 连接直接中断，而不是一条结构化的 `RUN_ERROR` 事件（问题 11）
+- `_event_stream` 现在捕获异常，发一条 `RUN_ERROR` 事件（`message` 里带 run_id，`code` 是错误分类），而不是直接断开连接
+- `finally` 记录 `Run finished`，成功和失败都会留下耗时
 
 ## 启动与关闭（lifespan）
 
@@ -92,28 +99,28 @@ except Exception as e:
 
 | 入口 | 行为 |
 | --- | --- |
-| `/invoke` | `logger.exception`（有栈）→ 500 `Unexpected error` |
-| `/stream` | `logger.error`（**无栈**）→ error 事件 → `[DONE]`；HTTP 200 |
-| `/agui/run` | 无捕获，SSE 连接中断 |
+| `/invoke` | `logger.exception`（有栈）→ 500 + `X-Run-ID` / `X-Error-Code` |
+| `/stream` | `logger.exception`（有栈）→ error 事件（code + run_id）→ `[DONE]`；HTTP 200 |
+| `/agui/run` | `RUN_ERROR` 事件（code + run_id） |
 
 重试耗尽后才会走到这里；如果配置了 LangGraph 重试，错误出现的时间会相应延后。
 
 ## 日志与可观测性
 
-- `/invoke` 使用 `logger.exception`，有完整栈
-- `/stream` 使用 `logger.error(f"Error in message generator: {e}")`，**没有栈**（问题 10）
-- `LogLLMCalls` 只实现 `on_llm_end`，没有 `on_llm_error`：失败调用不会留下“哪个模型失败”的日志
-- `LogGraphNodes.on_chain_error` 会记 `Node: xxx failed after Ns`，但不带异常内容
+- `/invoke` 和 `/stream` 都使用 `logger.exception`，有完整栈
+- `LogLLMCalls.on_llm_error` 记录失败调用（异常类型 + 消息 + 栈）
+- `LogGraphNodes.on_chain_error` 会记 `Node: xxx failed after Ns: 异常类型: 消息`
 - 请求级的 `run_id` / `thread_id` / `user_id` 通过 `core/log_context.py` 的 contextvar 注入日志格式，便于按 run 或 thread 检索
+- `error_code()` 把异常映射成稳定分类，供 SSE / HTTP / AG-UI 共用
 
 ## 客户端与 UI
 
 ### AgentClient
 
-- 每个 HTTP 方法把 `httpx.HTTPError` 包成 `AgentClientError`
+- 每个 HTTP 方法把 `httpx.HTTPError` 包成 `AgentClientError`；如果响应带 `X-Run-ID` / `X-Error-Code`，会附在错误消息里
 - **但响应体解析不在 `try` 内**：`response.json()` / `model_validate` 失败会抛原始 `JSONDecodeError` / `ValidationError`（问题 3）
-- `_parse_stream_line` 对畸形 SSE 抛裸 `Exception`（`client.py:186-195`）
-- `/stream` 的 error 事件被转成 `ChatMessage(type="ai", content="Error: Internal server error")`（`client.py:199-201`），**作为普通 AI 消息显示并留在会话里**，不是错误提示
+- `_parse_stream_line` 对畸形 SSE 抛裸 `Exception`（问题 3）；正常 error 事件则会解析出 `code` / `run_id`
+- `/stream` 的 error 事件被转成 `ChatMessage(type="ai", content="Error: ... (code=..., run_id=...)")`，**仍作为普通 AI 消息显示并留在会话里**，但文案已经可以直接定位
 
 ### Streamlit
 
@@ -127,19 +134,19 @@ except Exception as e:
 | --- | --- | --- | --- |
 | 1 | 高 | 普通接口未知 agent 返回 500 而非 404；`get_agent()` 的 `KeyError` 未被捕获 | `service.py:229/264/457/491`；对照 `agui.py:122-125` |
 | 2 | 高 | `message_generator` 的 `_handle_input` / `get_agent` 在 `try` 之外，异常时不发 error 事件、不发 `[DONE]`、`finally` 不执行 | `service.py:264-267` |
-| 3 | 中 | 客户端只包装 `httpx.HTTPError`；JSON/模型校验错误和流解析错误会以裸异常冒泡，Streamlit 捕获不到 | `client.py:70-73/128-132/177/186-195` |
+| 3 | 中 | 客户端只包装 `httpx.HTTPError`；错误帧的 code/run_id 已能透传，畸形 JSON / 模型校验错误仍是裸异常 | `client.py:70-73/128-132/177/186-195` |
 | 5 | 低 | `/feedback` 的 LangSmith 调用无兜底，与相邻代码风格不一致 | `service.py:427-434` |
 | 6 | 低 | agent 加载失败无对外信号：GitHub MCP 静默降级；lazy agent 加载失败后请求变成 `RuntimeError` → 500 | `github_mcp_agent.py:80-83`、`service.py:104-109`、`agents/agents.py:79-82` |
-| 10 | 中 | `/stream` 失败无栈日志；没有 `on_llm_error`，失败调用不可见 | `service.py:366`、`service/utils.py:26-44` |
-| 11 | 中 | AG-UI 流中异常未捕获，连接直接中断而非发 `RUN_ERROR` 事件 | `agui.py:89-107` |
+| 10 | ~~中~~ 已修复（2026-10-18） | `/stream` 改用 `logger.exception`；补 `on_llm_error`，失败调用可见 | `service.py:366`、`service/utils.py:26-50` |
+| 11 | ~~中~~ 已修复（2026-10-18） | AG-UI 捕获异常并发 `RUN_ERROR` 事件（code + run_id） | `agui.py:89-115` |
 
 建议修复顺序：
 
 1. **问题 1**：在 `get_agent` 调用处复用 AG-UI 的 `KeyError → 404`；`/stream` 需要先完成 agent 解析再返回 `StreamingResponse`，否则只能在流内发 error 事件
 2. **问题 2**：把 `get_agent` + `_handle_input` 移入 `try`，或在 generator 入口单独兜底并发 `[DONE]`
 3. **问题 3**：`_parse_stream_line` 与响应解析统一抛 `AgentClientError`，并保留原始异常为 `__cause__`
-4. **问题 10**：`/stream` 改用 `logger.exception`；给 `LogLLMCalls` 补 `on_llm_error`
-5. **问题 11**：`_event_stream` 包 try/except，按 AG-UI 协议发 `RUN_ERROR` 事件后正常结束
+4. **问题 10（已完成）**：`/stream` 改用 `logger.exception`；`LogLLMCalls` 补了 `on_llm_error`
+5. **问题 11（已完成）**：`_event_stream` 捕获异常并按 AG-UI 协议发 `RUN_ERROR` 事件
 6. 其余按需处理
 
 ## 测试覆盖
@@ -147,8 +154,11 @@ except Exception as e:
 现有覆盖：
 
 - `tests/service/test_threads.py:233-242`：checkpointer `alist` 抛错 → 500
-- `tests/service/test_agui.py:144-146`：未知 agent → 404
-- `tests/client/test_client.py`：HTTP 错误 → `AgentClientError`
+- `tests/service/test_agui.py`：未知 agent → 404；运行失败 → `RUN_ERROR` 事件
+- `tests/service/test_service.py`：`/invoke` 失败带 `X-Run-ID` / `X-Error-Code`；`/stream` 错误帧带 code + run_id + `[DONE]`
+- `tests/service/test_utils.py`：`error_code` 映射；`on_llm_error` 日志
+- `tests/client/test_client.py`：HTTP 错误 → `AgentClientError`；错误帧 code/run_id 解析
+- `tests/service/test_agent_loading.py`：agent 加载失败行为
 - `tests/service/test_streamlit_app.py`：正常路径无异常
 
 缺口：
@@ -156,8 +166,6 @@ except Exception as e:
 - 普通接口未知 agent 的 404/500 行为
 - `message_generator` 在进入 `try` 之前失败的流行为
 - 客户端收到畸形 JSON / 畸形 SSE 时的异常类型
-- LLM 抛错时 `/invoke`、`/stream`、`/agui/run` 各自的行为（500 / error 事件 / 连接中断）
 - 各 provider 的超时与重试配置断言
-- `on_llm_error` 日志是否产生
 
 > 注：`tests/app/test_streamlit_app.py::test_app_simple_non_streaming` 在 Windows 本地会因 `tests/conftest.py` 的 `mock_env` 清空环境变量、Streamlit 后台线程执行 `Path.home()` 失败而报错；这是环境问题，与业务代码无关。
