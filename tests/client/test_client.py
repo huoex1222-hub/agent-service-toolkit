@@ -450,3 +450,41 @@ async def test_aget_user_threads(agent_client):
         with pytest.raises(AgentClientError) as exc:
             await agent_client.aget_user_threads(USER_ID)
         assert "500 Internal Server Error" in str(exc.value)
+
+
+def test_parse_stream_error_includes_code_and_run_id(agent_client) -> None:
+    line = (
+        'data: {"type": "error", "content": "Internal server error", '
+        '"code": "node_timeout", "run_id": "01a14d0a-20c9-7460-b8d0-1a42e85e519a"}'
+    )
+
+    parsed = agent_client._parse_stream_line(line)
+
+    assert isinstance(parsed, ChatMessage)
+    assert parsed.type == "ai"
+    assert "Internal server error" in parsed.content
+    assert "code=node_timeout" in parsed.content
+    assert "run_id=01a14d0a-20c9-7460-b8d0-1a42e85e519a" in parsed.content
+
+
+def test_parse_stream_error_without_correlation_ids(agent_client) -> None:
+    parsed = agent_client._parse_stream_line('data: {"type": "error", "content": "boom"}')
+
+    assert isinstance(parsed, ChatMessage)
+    assert parsed.content == "Error: boom"
+
+
+def test_invoke_error_includes_correlation_headers(agent_client) -> None:
+    error_response = Response(
+        500,
+        text="Internal Server Error",
+        headers={"X-Run-ID": "run-1", "X-Error-Code": "node_timeout"},
+        request=Request("POST", "http://test/test-agent/invoke"),
+    )
+
+    with patch("httpx.post", return_value=error_response):
+        with pytest.raises(AgentClientError) as exc:
+            agent_client.invoke("hi")
+
+    assert "code=node_timeout" in str(exc.value)
+    assert "run_id=run-1" in str(exc.value)

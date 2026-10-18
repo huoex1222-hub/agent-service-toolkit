@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import uuid4
 
-from ag_ui.core import EventType, RunAgentInput
+from ag_ui.core import EventType, RunAgentInput, RunErrorEvent
 from ag_ui.encoder import EventEncoder
 from ag_ui_langgraph import LangGraphAgent
 from fastapi import APIRouter, HTTPException, Request
@@ -26,7 +26,7 @@ from agents import DEFAULT_AGENT, AgentGraph, get_agent
 from core import settings
 from core.log_context import bind_correlation_ids, duration_suffix, mark_run_started
 from service.tracing import TracingCallbackHandler, run_id_as_trace_id
-from service.utils import LogGraphNodes, LogLLMCalls, ensure_model_available
+from service.utils import LogGraphNodes, LogLLMCalls, ensure_model_available, error_code
 
 logger = logging.getLogger(__name__)
 
@@ -95,16 +95,26 @@ async def _event_stream(
 ) -> AsyncGenerator[str, None]:
     # A new LangGraphAgent per request: it holds per-run state and is cheap to build.
     agent = LangGraphAgent(name=agent_id, graph=graph, config=config)  # type: ignore[arg-type]
-    async for event in agent.run(input_data):
-        # Don't forward RAW passthrough events. Standard AG-UI clients ignore them,
-        # and they expose server-side internals - including fully rendered prompts
-        # from on_chat_model_start - to the caller. Remove this filter only if the
-        # endpoint is consumed by a trusted middle layer and you want the full
-        # event firehose (e.g. for the AG-UI Event Inspector).
-        if event.type == EventType.RAW:
-            continue
-        yield encoder.encode(event)
-    logger.info(f"Run finished{duration_suffix()}")
+    try:
+        async for event in agent.run(input_data):
+            # Don't forward RAW passthrough events. Standard AG-UI clients ignore them,
+            # and they expose server-side internals - including fully rendered prompts
+            # from on_chat_model_start - to the caller. Remove this filter only if the
+            # endpoint is consumed by a trusted middle layer and you want the full
+            # event firehose (e.g. for the AG-UI Event Inspector).
+            if event.type == EventType.RAW:
+                continue
+            yield encoder.encode(event)
+    except Exception as e:
+        logger.exception(f"AG-UI run failed: {e}")
+        yield encoder.encode(
+            RunErrorEvent(
+                message=f"Internal server error (run_id={input_data.run_id})",
+                code=error_code(e),
+            )
+        )
+    finally:
+        logger.info(f"Run finished{duration_suffix()}")
 
 
 @router.post("/run", operation_id="agui_run_default")

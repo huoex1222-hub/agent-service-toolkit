@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 from uuid import UUID
 
+import httpx
 from fastapi import HTTPException
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import (
@@ -16,6 +17,7 @@ from langchain_core.messages import (
     ChatMessage as LangchainChatMessage,
 )
 from langchain_core.outputs import LLMResult
+from langgraph.errors import NodeTimeoutError
 
 from core import settings
 from schema import ChatMessage
@@ -41,6 +43,12 @@ class LogLLMCalls(AsyncCallbackHandler):
                 if "input_tokens" in usage and "output_tokens" in usage:
                     tokens = f" {usage['input_tokens']}→{usage['output_tokens']} tokens"
                 logger.info(f"LLM call: {model}{tokens}")
+
+    async def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        logger.error(
+            f"LLM call failed: {type(error).__name__}: {error}",
+            exc_info=(type(error), error, error.__traceback__),
+        )
 
 
 class LogGraphNodes(AsyncCallbackHandler):
@@ -77,7 +85,35 @@ class LogGraphNodes(AsyncCallbackHandler):
     async def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         node, started = self._runs.pop(run_id, ("", 0.0))
         if node:
-            logger.info(f"Node: {node} failed after {time.perf_counter() - started:.2f}s")
+            logger.warning(
+                f"Node: {node} failed after {time.perf_counter() - started:.2f}s: "
+                f"{type(error).__name__}: {error}"
+            )
+
+
+def error_code(error: BaseException) -> str:
+    """A stable, non-sensitive category for a failed run."""
+    if isinstance(error, NodeTimeoutError):
+        return "node_timeout"
+    status = getattr(error, "status_code", None)
+    if status == 429:
+        return "rate_limit"
+    if isinstance(status, int) and status >= 500:
+        return "provider_error"
+    if isinstance(status, int):
+        return "provider_client_error"
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(error, (ConnectionError, httpx.TransportError)):
+        return "connection_error"
+    name = type(error).__name__.lower()
+    if "timeout" in name:
+        return "timeout"
+    if "connection" in name:
+        return "connection_error"
+    if "ratelimit" in name or "rate_limit" in name:
+        return "rate_limit"
+    return "internal"
 
 
 def ensure_model_available(model: Any) -> None:

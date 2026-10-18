@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import langsmith
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langgraph.errors import NodeTimeoutError
 from langgraph.types import Interrupt, StateSnapshot
 
 from agents.agents import Agent
@@ -26,6 +27,18 @@ def test_invoke(test_client, mock_agent) -> None:
     output = ChatMessage.model_validate(response.json())
     assert output.type == "ai"
     assert output.content == ANSWER
+
+
+def test_invoke_error_reports_run_id_and_code(test_client, mock_agent) -> None:
+    mock_agent.ainvoke.side_effect = NodeTimeoutError("model", 2.0, kind="run", run_timeout=2.0)
+
+    response = test_client.post("/invoke", json={"message": "hi"})
+
+    assert response.status_code == 500
+    assert response.headers["X-Error-Code"] == "node_timeout"
+    assert response.headers["X-Run-ID"]
+    assert "run_id=" in response.json()["detail"]
+    assert "code=node_timeout" in response.json()["detail"]
 
 
 def test_invoke_custom_agent(test_client, mock_agent) -> None:
@@ -329,6 +342,29 @@ async def test_stream(test_client, mock_agent) -> None:
         assert len(final_messages) == 1
         assert final_messages[0]["content"]["content"] == FINAL_ANSWER
         assert final_messages[0]["content"]["type"] == "ai"
+
+
+def test_stream_error_reports_run_id_and_code(test_client, mock_agent) -> None:
+    async def failing_astream(**kwargs):
+        raise NodeTimeoutError("chatbot", 2.0, kind="run", run_timeout=2.0)
+        yield  # pragma: no cover
+
+    mock_agent.astream = failing_astream
+
+    with test_client.stream("POST", "/stream", json={"message": "hi"}) as response:
+        assert response.status_code == 200
+        lines = [line for line in response.iter_lines() if line]
+
+    frames = [
+        json.loads(line[len("data: ") :])
+        for line in lines
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    errors = [frame for frame in frames if frame["type"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["code"] == "node_timeout"
+    assert errors[0]["run_id"]
+    assert lines[-1] == "data: [DONE]"
 
 
 @pytest.mark.asyncio

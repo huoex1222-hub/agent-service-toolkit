@@ -1,11 +1,13 @@
 import logging
 from uuid import uuid4
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolCall, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from langgraph.errors import NodeTimeoutError
 
-from service.utils import LogGraphNodes, LogLLMCalls, langchain_to_chat_message
+from service.utils import LogGraphNodes, LogLLMCalls, error_code, langchain_to_chat_message
 
 
 def test_messages_from_langchain() -> None:
@@ -128,3 +130,34 @@ async def test_log_graph_nodes_reports_a_failed_node(caplog: pytest.LogCaptureFi
         await handler.on_chain_error(RuntimeError("boom"), run_id=run_id)
 
     assert "Node: tools failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_log_llm_calls_reports_failure(caplog: pytest.LogCaptureFixture) -> None:
+    try:
+        raise TimeoutError("model timed out")
+    except TimeoutError as error:
+        with caplog.at_level(logging.ERROR, logger="service.utils"):
+            await LogLLMCalls().on_llm_error(error)
+
+    assert "LLM call failed: TimeoutError: model timed out" in caplog.text
+
+
+def test_error_code_maps_known_failures() -> None:
+    assert (
+        error_code(NodeTimeoutError("chatbot", 2.0, kind="run", run_timeout=2.0)) == "node_timeout"
+    )
+    assert error_code(TimeoutError()) == "timeout"
+    assert error_code(httpx.ReadTimeout("slow")) == "timeout"
+    assert error_code(ConnectionError()) == "connection_error"
+    assert error_code(httpx.ConnectError("refused")) == "connection_error"
+
+    rate_limited = RuntimeError("limited")
+    rate_limited.status_code = 429  # type: ignore[attr-defined]
+    assert error_code(rate_limited) == "rate_limit"
+
+    provider_down = RuntimeError("down")
+    provider_down.status_code = 503  # type: ignore[attr-defined]
+    assert error_code(provider_down) == "provider_error"
+
+    assert error_code(ValueError("bad input")) == "internal"

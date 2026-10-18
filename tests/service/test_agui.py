@@ -49,6 +49,17 @@ interrupt_graph.add_edge("ask", END)
 interrupt_agent = interrupt_graph.compile(checkpointer=MemorySaver())
 
 
+async def fail_node(state: MessagesState) -> MessagesState:
+    raise TimeoutError("simulated timeout")
+
+
+error_graph = StateGraph(MessagesState)
+error_graph.add_node("fail", fail_node)
+error_graph.set_entry_point("fail")
+error_graph.add_edge("fail", END)
+error_agent = error_graph.compile(checkpointer=MemorySaver())
+
+
 @pytest.fixture(autouse=True)
 def _reset_captured_configurable():
     """Every test using model_agent writes to this shared dict; reset before each test."""
@@ -65,7 +76,11 @@ def allow_fake_model(monkeypatch):
 @pytest.fixture
 def mock_agui_agent():
     def agent_lookup(agent_id: str):
-        agents = {"model-agent": model_agent, "interrupt-agent": interrupt_agent}
+        agents = {
+            "model-agent": model_agent,
+            "interrupt-agent": interrupt_agent,
+            "error-agent": error_agent,
+        }
         try:
             return agents[agent_id]
         except KeyError:
@@ -248,3 +263,12 @@ def test_agui_auth(mock_settings, mock_agui_agent, test_client) -> None:
         headers={"Authorization": "Bearer test-secret"},
     )
     assert response.status_code == 200
+
+
+def test_agui_run_failure_emits_run_error(mock_agui_agent, test_client) -> None:
+    events = collect_events(test_client, "/agui/error-agent/run", run_input())
+
+    errors = [e for e in events if e["type"] == "RUN_ERROR"]
+    assert len(errors) == 1
+    assert errors[0]["code"] == "timeout"
+    assert "run_id=test-run" in errors[0]["message"]

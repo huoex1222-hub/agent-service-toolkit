@@ -49,6 +49,7 @@ from service.utils import (
     LogLLMCalls,
     convert_message_content_to_string,
     ensure_model_available,
+    error_code,
     langchain_to_chat_message,
     messages_from_checkpoint,
     remove_tool_calls,
@@ -250,7 +251,17 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
         return output
     except Exception as e:
         logger.exception(f"An exception occurred: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error")
+        code = error_code(e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error (run_id={run_id}, code={code})",
+            headers={"X-Run-ID": str(run_id), "X-Error-Code": code},
+        )
+
+
+def _sse_error(content: str, code: str, run_id: UUID) -> str:
+    payload = {"type": "error", "content": content, "code": code, "run_id": str(run_id)}
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 async def message_generator(
@@ -335,8 +346,8 @@ async def message_generator(
                     chat_message = langchain_to_chat_message(message)
                     chat_message.run_id = str(run_id)
                 except Exception as e:
-                    logger.error(f"Error parsing message: {e}")
-                    yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'})}\n\n"
+                    logger.exception(f"Error parsing message: {e}")
+                    yield _sse_error("Unexpected error", "message_parse", run_id)
                     continue
                 # LangGraph re-sends the input message, which feels weird, so drop it
                 if chat_message.type == "human" and chat_message.content == user_input.message:
@@ -363,8 +374,8 @@ async def message_generator(
                     # So we only print non-empty content.
                     yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)}, ensure_ascii=False)}\n\n"
     except Exception as e:
-        logger.error(f"Error in message generator: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'})}\n\n"
+        logger.exception(f"Error in message generator: {e}")
+        yield _sse_error("Internal server error", error_code(e), run_id)
     finally:
         logger.info(f"Run finished{duration_suffix()}")
         yield "data: [DONE]\n\n"
