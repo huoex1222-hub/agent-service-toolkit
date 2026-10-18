@@ -11,6 +11,7 @@ from langgraph.managed import RemainingSteps
 from langgraph.prebuilt import ToolNode
 
 from agents.safeguard import Safeguard, SafeguardOutput, SafetyAssessment
+from agents.tool_retry import handle_tool_errors, retry_tool_call
 from agents.tools import calculator, web_search
 from core import get_model, settings
 from core.prompts import get_prompt
@@ -110,7 +111,10 @@ async def block_unsafe_content(state: AgentState, config: RunnableConfig) -> Age
 # Define the graph
 agent = StateGraph(AgentState)
 agent.add_node("model", acall_model)
-agent.add_node("tools", ToolNode(tools))
+agent.add_node(
+    "tools",
+    ToolNode(tools, handle_tool_errors=handle_tool_errors, awrap_tool_call=retry_tool_call),
+)
 agent.add_node("guard_input", safeguard_input)
 agent.add_node("block_unsafe_content", block_unsafe_content)
 agent.set_entry_point("guard_input")

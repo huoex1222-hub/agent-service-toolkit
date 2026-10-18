@@ -37,7 +37,7 @@ def calculator_func(expression: str) -> str:
         )
         return re.sub(r"^\[|\]$", "", output)
     except Exception as e:
-        raise ValueError(
+        return (
             f'calculator("{expression}") raised error: {e}.'
             " Please try again with a valid numerical expression"
         )
@@ -108,12 +108,8 @@ def web_search_func(query: str) -> str:
     try:
         results = DDGS(timeout=SEARCH_TIMEOUT).text(query, max_results=5)
     except Exception as e:
-        # ddgs raises on timeouts and on empty result sets. ToolNode's default handler
-        # re-raises anything that isn't a ToolInvocationError, which kills the whole run
-        # and leaves the checkpoint with dangling tool_calls, so failures must come back
-        # as tool output instead.
         logger.warning(f"web search failed for {query!r}: {e}")
-        return f"Search failed: {e}"
+        raise
     if not results:
         return "No results found."
     return "\n\n".join(

@@ -1,11 +1,20 @@
 from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.func import entrypoint
+from langgraph.types import RetryPolicy, TimeoutPolicy
 
 from core import get_model, settings
 
+CHATBOT_RETRY = RetryPolicy(
+    max_attempts=3,
+    initial_interval=0.5,
+    backoff_factor=2.0,
+    max_interval=8.0,
+)
+CHATBOT_TIMEOUT = TimeoutPolicy(run_timeout=120, idle_timeout=60)
 
-@entrypoint()
+
+@entrypoint(retry_policy=CHATBOT_RETRY, timeout=CHATBOT_TIMEOUT)
 async def chatbot(
     inputs: dict[str, list[BaseMessage]],
     *,
